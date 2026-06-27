@@ -1,10 +1,11 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
-import { Loader2, RefreshCw, Radio, Users, Calendar, ArrowLeft, Eye, EyeOff, ShieldAlert } from "lucide-react";
+import React, { useState, useEffect, useRef } from "react";
+import { Loader2, RefreshCw, Radio, Users, Calendar, ArrowLeft, Eye, EyeOff, ShieldAlert, Sparkles, Brain, CheckCircle, HelpCircle, PhoneCall } from "lucide-react";
 import Link from "next/link";
 import { getApiUrl } from "@/lib/livekit-client";
-import { LiveKitRoom, RoomAudioRenderer } from "@livekit/components-react";
+import { LiveKitRoom, RoomAudioRenderer, useRoomContext } from "@livekit/components-react";
+import { RoomEvent } from "livekit-client";
 
 interface RoomInfo {
   name: string;
@@ -46,15 +47,13 @@ export default function MonitorPage() {
 
   useEffect(() => {
     fetchRooms();
-    // Poll rooms every 10 seconds
-    const interval = setInterval(() => fetchRooms(true), 10000);
+    const interval = setInterval(() => fetchRooms(true), 8000);
     return () => clearInterval(interval);
   }, []);
 
   const watchRoom = async (roomName: string) => {
     try {
       setErrorMessage("");
-      // Fetch a watcher token (isWatcher: true)
       const res = await fetch(getApiUrl("/api/token"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -204,51 +203,22 @@ export default function MonitorPage() {
           </h2>
 
           {watchToken && watchUrl && watchRoomName ? (
-            <div className="p-6 bg-gradient-to-b from-indigo-950/20 to-slate-950 border border-indigo-500/20 rounded-2xl flex flex-col items-center justify-center text-center relative overflow-hidden">
-              <div className="absolute top-0 right-0 p-3">
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
-                </span>
-              </div>
-
-              <div className="w-16 h-16 bg-indigo-500/10 rounded-full flex items-center justify-center text-indigo-400 mb-4 animate-pulse">
-                <Radio className="h-6 w-6" />
-              </div>
-
-              <h3 className="font-bold text-white mb-1">Watching Room</h3>
-              <p className="text-xs text-slate-400 font-mono mb-4">{watchRoomName}</p>
-              
-              <div className="p-2 bg-indigo-500/10 border border-indigo-500/20 rounded-xl mb-6">
-                <p className="text-[10px] text-indigo-300">
-                  Connected in Watcher Mode. Your microphone is disabled, but you can hear the ongoing conversation.
-                </p>
-              </div>
-
-              <button
-                onClick={stopWatching}
-                className="w-full py-2 bg-red-600 hover:bg-red-500 border border-red-700/30 text-white text-xs font-semibold rounded-xl active:scale-95 transition-all duration-200"
-              >
-                Disconnect Feed
-              </button>
-
-              {/* Render RoomAudioRenderer inside LiveKitRoom context to play audio streams */}
-              <LiveKitRoom
-                video={false}
-                audio={true}
-                token={watchToken}
-                serverUrl={watchUrl}
-                onDisconnected={stopWatching}
-                connectOptions={{ autoSubscribe: true }}
-              >
-                <RoomAudioRenderer />
-              </LiveKitRoom>
-            </div>
+            <LiveKitRoom
+              video={false}
+              audio={true}
+              token={watchToken}
+              serverUrl={watchUrl}
+              onDisconnected={stopWatching}
+              connectOptions={{ autoSubscribe: true }}
+            >
+              <LiveFeedMonitor roomName={watchRoomName} onDisconnect={stopWatching} />
+              <RoomAudioRenderer />
+            </LiveKitRoom>
           ) : (
             <div className="p-8 bg-slate-900/20 border border-slate-900 border-dashed rounded-2xl text-center flex flex-col items-center justify-center py-16">
               <EyeOff className="h-8 w-8 text-slate-700 mb-3" />
               <p className="text-xs text-slate-500">
-                Select "Watch Live" next to an active channel to listen to the call feed.
+                Select "Watch Live" next to an active channel to listen to the call feed and view real-time logs.
               </p>
             </div>
           )}
@@ -258,3 +228,172 @@ export default function MonitorPage() {
     </main>
   );
 }
+
+// Subcomponent that consumes the LiveKit room context to decode data channel messages
+function LiveFeedMonitor({ roomName, onDisconnect }: { roomName: string; onDisconnect: () => void }) {
+  const room = useRoomContext();
+  const [agentState, setAgentState] = useState<string>("idle");
+  const [transcript, setTranscript] = useState<{ speaker: string; text: string; timestamp: string }[]>([]);
+  const [intent, setIntent] = useState<string>("general");
+  const [action, setAction] = useState<string>("idle");
+  const [summary, setSummary] = useState<string>("");
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    // Scroll chat window to bottom on new message
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [transcript]);
+
+  useEffect(() => {
+    const handleDataReceived = (payload: Uint8Array) => {
+      const decoder = new TextDecoder();
+      try {
+        const text = decoder.decode(payload);
+        const data = JSON.parse(text);
+        
+        logger.info("Watcher received data packet:", data);
+        
+        if (data.type === "agent_state") {
+          setAgentState(data.state);
+        } else if (data.type === "transcript") {
+          setTranscript((prev) => {
+            // Avoid exact duplicate checks (final updates vs chunk updates)
+            if (prev.length > 0) {
+              const last = prev[prev.length - 1];
+              if (last.speaker === data.speaker && last.text === data.text) {
+                return prev;
+              }
+            }
+            return [...prev, {
+              speaker: data.speaker,
+              text: data.text,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+            }];
+          });
+        } else if (data.type === "intent") {
+          setIntent(data.intent);
+        } else if (data.type === "action") {
+          setAction(data.action);
+        } else if (data.type === "summary") {
+          setSummary(data.text);
+        }
+      } catch (err) {
+        console.error("Failed to parse data package from room:", err);
+      }
+    };
+
+    room.on(RoomEvent.DataReceived, handleDataReceived);
+    return () => {
+      room.off(RoomEvent.DataReceived, handleDataReceived);
+    };
+  }, [room]);
+
+  // CSS mappings for agent state glows
+  const stateColor = 
+    agentState === "speaking" ? "bg-emerald-500 shadow-emerald-500/30" : 
+    agentState === "thinking" ? "bg-amber-500 shadow-amber-500/30" : 
+    agentState === "listening" ? "bg-indigo-500 shadow-indigo-500/30" : 
+    "bg-slate-500 shadow-slate-500/30";
+
+  return (
+    <div className="bg-slate-900 border border-slate-800 rounded-2xl flex flex-col shadow-xl overflow-hidden max-h-[700px]">
+      
+      {/* Watcher Status Panel */}
+      <div className="p-4 bg-slate-900 border-b border-slate-800/80 flex items-center justify-between">
+        <div>
+          <span className="text-[10px] uppercase font-bold text-indigo-400 tracking-wider">Watcher Mode Active</span>
+          <h4 className="text-sm font-semibold text-white font-mono">{roomName}</h4>
+        </div>
+        <button 
+          onClick={onDisconnect}
+          className="text-xs py-1 px-3 bg-red-950/20 border border-red-900/40 text-red-400 hover:bg-red-950/40 rounded-lg transition-all"
+        >
+          Disconnect
+        </button>
+      </div>
+
+      {/* Real-time State Monitors */}
+      <div className="p-4 bg-slate-950/40 grid grid-cols-3 gap-2 border-b border-slate-800/60 text-center">
+        <div className="p-2 bg-slate-900/60 border border-slate-800/50 rounded-xl flex flex-col items-center">
+          <span className="text-[9px] text-slate-500 uppercase font-semibold">Agent State</span>
+          <span className="flex items-center gap-1.5 mt-1">
+            <span className={`w-2 h-2 rounded-full ${stateColor} animate-pulse shadow-md`} />
+            <span className="text-xs font-semibold text-slate-200 capitalize">{agentState}</span>
+          </span>
+        </div>
+
+        <div className="p-2 bg-slate-900/60 border border-slate-800/50 rounded-xl flex flex-col items-center">
+          <span className="text-[9px] text-slate-500 uppercase font-semibold">Intent</span>
+          <span className="flex items-center gap-1.5 mt-1 text-xs font-semibold text-slate-200 capitalize">
+            {intent === "booking" ? <CheckCircle className="h-3.5 w-3.5 text-indigo-400" /> :
+             intent === "transfer_request" ? <PhoneCall className="h-3.5 w-3.5 text-red-400 animate-bounce" /> :
+             <HelpCircle className="h-3.5 w-3.5 text-slate-400" />}
+            {intent.replace("_", " ")}
+          </span>
+        </div>
+
+        <div className="p-2 bg-slate-900/60 border border-slate-800/50 rounded-xl flex flex-col items-center">
+          <span className="text-[9px] text-slate-500 uppercase font-semibold">Action</span>
+          <span className="text-[10px] font-semibold text-slate-300 mt-1 capitalize truncate max-w-[80px]">
+            {action.replace("_", " ")}
+          </span>
+        </div>
+      </div>
+
+      {/* Live Transcript Log */}
+      <div className="flex-1 p-4 overflow-y-auto max-h-[300px] min-h-[220px] bg-slate-950/20 flex flex-col gap-3" ref={scrollRef}>
+        {transcript.length === 0 ? (
+          <div className="flex-1 flex flex-col items-center justify-center py-10 text-center">
+            <Loader2 className="h-5 w-5 text-indigo-500 animate-spin mb-2" />
+            <p className="text-[10px] text-slate-500">Waiting for first utterance...</p>
+          </div>
+        ) : (
+          transcript.map((msg, index) => {
+            const isAgent = msg.speaker === "agent";
+            return (
+              <div 
+                key={index} 
+                className={`flex flex-col max-w-[85%] ${isAgent ? "self-start items-start" : "self-end items-end"}`}
+              >
+                <span className="text-[8px] text-slate-500 mb-0.5 px-1">
+                  {isAgent ? "Agent" : "Caller"} &bull; {msg.timestamp}
+                </span>
+                <div 
+                  className={`p-3 rounded-2xl text-xs leading-relaxed ${
+                    isAgent 
+                      ? "bg-slate-800 text-slate-100 rounded-tl-none border border-slate-700/30" 
+                      : "bg-indigo-600 text-white rounded-tr-none"
+                  }`}
+                >
+                  {msg.text}
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {/* Final Summary Card (if generated) */}
+      {summary && (
+        <div className="p-4 bg-gradient-to-tr from-amber-500/10 to-indigo-500/10 border-t border-slate-800">
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <Sparkles className="h-4 w-4 text-amber-400" />
+            <h5 className="text-[10px] uppercase font-bold text-amber-400 tracking-wider">AI Call Summary</h5>
+          </div>
+          <p className="text-xs text-slate-300 leading-relaxed italic bg-slate-950/60 p-3 rounded-xl border border-slate-800">
+            {summary}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Client logging helper
+const logger = {
+  info: (...args: any[]) => console.log("[LiveFeedMonitor] INFO:", ...args),
+  error: (...args: any[]) => console.error("[LiveFeedMonitor] ERROR:", ...args)
+};
