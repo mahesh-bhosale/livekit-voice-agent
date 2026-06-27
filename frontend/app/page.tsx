@@ -26,12 +26,15 @@ export default function Main() {
   const [status, setStatus] = useState<"idle" | "connecting" | "connected" | "disconnected" | "error">("idle");
   const [errorMessage, setErrorMessage] = useState("");
   const [callSummary, setCallSummary] = useState<string | null>(null);
+  const [lastRoomName, setLastRoomName] = useState<string | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
 
   const startCall = async () => {
     try {
       setStatus("connecting");
       setErrorMessage("");
       setCallSummary(null);
+      setSummaryLoading(false);
 
       const roomRes = await fetch(getApiUrl("/api/rooms"), { method: "POST" });
       if (!roomRes.ok) throw new Error("Failed to create room on the backend");
@@ -68,9 +71,43 @@ export default function Main() {
   const handleDisconnect = () => {
     setToken(null);
     setRoomUrl(null);
+    if (roomName) setLastRoomName(roomName);
     setRoomName(null);
     setStatus("disconnected");
   };
+
+  useEffect(() => {
+    if (status !== "disconnected" || !lastRoomName || callSummary) return;
+
+    let cancelled = false;
+    setSummaryLoading(true);
+
+    const poll = async () => {
+      for (let attempt = 0; attempt < 15; attempt++) {
+        if (cancelled) return;
+        try {
+          const res = await fetch(getApiUrl(`/api/summaries/by-room/${encodeURIComponent(lastRoomName)}`));
+          if (res.ok) {
+            const data = await res.json();
+            if (!cancelled && data.summary) {
+              setCallSummary(data.summary);
+              setSummaryLoading(false);
+              return;
+            }
+          }
+        } catch {
+          // retry
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      if (!cancelled) setSummaryLoading(false);
+    };
+
+    void poll();
+    return () => {
+      cancelled = true;
+    };
+  }, [status, lastRoomName, callSummary]);
 
   return (
     <main className="min-h-screen bg-radial from-slate-900 via-slate-950 to-black text-slate-100 flex flex-col justify-between font-sans">
@@ -119,6 +156,13 @@ export default function Main() {
               {errorMessage && (
                 <div className="w-full mb-6 p-3 bg-red-950/30 border border-red-800/50 text-red-400 text-xs rounded-xl">
                   {errorMessage}
+                </div>
+              )}
+
+              {summaryLoading && status === "disconnected" && !callSummary && (
+                <div className="w-full mb-6 p-4 bg-slate-950/60 border border-slate-800 rounded-xl text-left flex items-center gap-2">
+                  <Loader2 className="h-4 w-4 text-teal-400 animate-spin shrink-0" />
+                  <p className="text-xs text-slate-400">Generating call summary…</p>
                 </div>
               )}
 

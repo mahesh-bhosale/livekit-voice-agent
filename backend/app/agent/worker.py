@@ -21,7 +21,7 @@ from livekit.agents import (
 from livekit.agents.llm import ChatMessage
 from livekit.plugins import cartesia, deepgram, groq, silero
 
-from app.services.transfer import build_transfer_summary, initiate_warm_transfer
+from app.services.transfer import build_transfer_summary
 
 load_dotenv(override=True)
 
@@ -109,6 +109,26 @@ def db_save_call_summary(room_name: str, summary: str, transcript: list) -> dict
         db.close()
 
 
+async def initiate_transfer_via_api(room_name: str, reason: str, summary: str) -> str:
+    """Call the FastAPI server so Twilio webhooks resolve in the same process."""
+    import httpx
+
+    from app.config import settings
+
+    api_base = settings.BACKEND_API_URL.rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=70.0) as client:
+            response = await client.post(
+                f"{api_base}/api/transfer/initiate",
+                json={"room_name": room_name, "reason": reason, "summary": summary},
+            )
+            response.raise_for_status()
+            return response.json().get("outcome", "unavailable")
+    except Exception as exc:
+        logger.error("Transfer API call failed: %s", exc)
+        return "unavailable"
+
+
 class ClinicBookingAssistant(Agent):
     def __init__(self, room, transcript_turns: list, takeover_event: asyncio.Event):
         super().__init__(instructions=SYSTEM_PROMPT)
@@ -179,7 +199,7 @@ class ClinicBookingAssistant(Agent):
         await send_call_status(self.room, "transferring")
 
         summary = build_transfer_summary(reason, self.transcript_turns)
-        outcome = await initiate_warm_transfer(self.room.name, reason, summary)
+        outcome = await initiate_transfer_via_api(self.room.name, reason, summary)
 
         await send_custom_data(self.room, {"type": "action", "action": ""})
 
@@ -236,7 +256,7 @@ async def entrypoint(ctx: JobContext):
     cartesia_key = os.getenv("CARTESIA_API_KEY") or os.getenv("TTS_API_KEY")
     tts = cartesia.TTS(
         api_key=cartesia_key,
-        model="sonic-english",
+        model="sonic-3",
         voice="f786b574-daa5-4673-aa0c-cbe3e8534c02",
     )
 

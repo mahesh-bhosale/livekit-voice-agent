@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.db import engine, Base
-from app.routes import token, rooms, transfer
+from app.routes import token, rooms, transfer, summaries
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -21,6 +21,8 @@ app = FastAPI(
 origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
 ]
 
 app.add_middleware(
@@ -35,6 +37,7 @@ app.add_middleware(
 app.include_router(token.router, prefix="/api")
 app.include_router(rooms.router, prefix="/api")
 app.include_router(transfer.router, prefix="/api")
+app.include_router(summaries.router, prefix="/api")
 
 @app.get("/")
 def read_root():

@@ -25,6 +25,15 @@ export interface BookingData {
   phone: string;
 }
 
+export interface CallSummaryEntry {
+  id: number;
+  room_name: string;
+  summary: string;
+  transcript: TranscriptEntry[];
+  created_at: string | null;
+}
+
+
 export type AgentState = "idle" | "initializing" | "listening" | "thinking" | "speaking";
 
 export type CallStatus =
@@ -52,6 +61,8 @@ export interface MonitorState {
   roomsLoading: boolean;
   roomsError: string | null;
   isTakenOver: boolean;
+  pastSummaries: CallSummaryEntry[];
+  pastSummariesLoading: boolean;
 }
 
 export interface MonitorActions {
@@ -59,9 +70,11 @@ export interface MonitorActions {
   watchRoom: (roomName: string) => Promise<void>;
   stopWatching: () => void;
   handleDataMessage: (payload: Uint8Array) => void;
-  requestTakeover: () => void;
+  beginTakeover: () => void;
+  triggerTakeover: () => Promise<void>;
+  registerTakeoverExecute: (handler: (() => Promise<void>) | null) => void;
   setCallStatus: (status: CallStatus) => void;
-  registerTakeoverHandler: (handler: (() => void) | null) => void;
+  fetchPastSummaries: () => Promise<void>;
 }
 
 export function useMonitor(): [MonitorState, MonitorActions] {
@@ -83,9 +96,26 @@ export function useMonitor(): [MonitorState, MonitorActions] {
   const [roomsError, setRoomsError] = useState<string | null>(null);
 
   const [isTakenOver, setIsTakenOver] = useState(false);
-  const takeoverHandlerRef = useRef<(() => void) | null>(null);
+  const takeoverExecuteRef = useRef<(() => Promise<void>) | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const [pastSummaries, setPastSummaries] = useState<CallSummaryEntry[]>([]);
+  const [pastSummariesLoading, setPastSummariesLoading] = useState(true);
+
+  const fetchPastSummaries = useCallback(async () => {
+    try {
+      const res = await fetch(getApiUrl("/api/summaries"));
+      if (!res.ok) throw new Error("Failed to fetch summaries");
+      const data = await res.json();
+      setPastSummaries(data || []);
+    } catch (err: unknown) {
+      console.error("Failed to fetch summaries:", err);
+    } finally {
+      setPastSummariesLoading(false);
+    }
+  }, []);
+
 
   const fetchRooms = useCallback(async () => {
     try {
@@ -103,11 +133,12 @@ export function useMonitor(): [MonitorState, MonitorActions] {
 
   useEffect(() => {
     fetchRooms();
+    fetchPastSummaries();
     pollRef.current = setInterval(fetchRooms, 3000);
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [fetchRooms]);
+  }, [fetchRooms, fetchPastSummaries]);
 
   const watchRoom = useCallback(async (targetRoom: string) => {
     setCallStatus("connecting");
@@ -162,8 +193,9 @@ export function useMonitor(): [MonitorState, MonitorActions] {
     setTransferResult(null);
     setBookingData(null);
     setIsTakenOver(false);
-    takeoverHandlerRef.current = null;
-  }, []);
+    takeoverExecuteRef.current = null;
+    fetchPastSummaries();
+  }, [fetchPastSummaries]);
 
   const handleDataMessage = useCallback((payload: Uint8Array) => {
     try {
@@ -227,6 +259,7 @@ export function useMonitor(): [MonitorState, MonitorActions] {
         case "summary":
           setSummary(data.text);
           setCallStatus("ended");
+          fetchPastSummaries();
           break;
 
         default:
@@ -235,20 +268,23 @@ export function useMonitor(): [MonitorState, MonitorActions] {
     } catch {
       // ignore malformed packets
     }
+  }, [fetchPastSummaries]);
+
+  const beginTakeover = useCallback(() => {
+    setIsTakenOver(true);
+    setCallStatus("takeover");
   }, []);
 
-  const requestTakeover = useCallback(() => {
-    if (takeoverHandlerRef.current) {
-      takeoverHandlerRef.current();
-    } else {
-      setIsTakenOver(true);
-      setCallStatus("takeover");
+  const registerTakeoverExecute = useCallback((handler: (() => Promise<void>) | null) => {
+    takeoverExecuteRef.current = handler;
+  }, []);
+
+  const triggerTakeover = useCallback(async () => {
+    beginTakeover();
+    if (takeoverExecuteRef.current) {
+      await takeoverExecuteRef.current();
     }
-  }, []);
-
-  const registerTakeoverHandler = useCallback((handler: (() => void) | null) => {
-    takeoverHandlerRef.current = handler;
-  }, []);
+  }, [beginTakeover]);
 
   const state: MonitorState = {
     token,
@@ -266,6 +302,8 @@ export function useMonitor(): [MonitorState, MonitorActions] {
     roomsLoading,
     roomsError,
     isTakenOver,
+    pastSummaries,
+    pastSummariesLoading,
   };
 
   const actions: MonitorActions = {
@@ -273,9 +311,11 @@ export function useMonitor(): [MonitorState, MonitorActions] {
     watchRoom,
     stopWatching,
     handleDataMessage,
-    requestTakeover,
+    beginTakeover,
+    triggerTakeover,
+    registerTakeoverExecute,
     setCallStatus,
-    registerTakeoverHandler,
+    fetchPastSummaries,
   };
 
   return [state, actions];

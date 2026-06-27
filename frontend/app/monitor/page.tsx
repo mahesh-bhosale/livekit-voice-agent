@@ -39,6 +39,7 @@ import {
   type TranscriptEntry,
   type RoomInfo,
   type BookingData,
+  type CallSummaryEntry,
 } from "@/lib/useMonitor";
 import { APP_NAME } from "@/lib/branding";
 
@@ -117,7 +118,7 @@ export default function MonitorPage() {
               </button>
             )}
             {state.token && !state.isTakenOver && state.callStatus !== "ended" && (
-              <TakeoverButton onTakeover={actions.requestTakeover} />
+              <TakeoverButton onTakeover={() => void actions.triggerTakeover()} />
             )}
             {state.token && (
               <button
@@ -151,6 +152,8 @@ export default function MonitorPage() {
           loading={state.roomsLoading}
           error={state.roomsError}
           onWatch={actions.watchRoom}
+          pastSummaries={state.pastSummaries}
+          pastSummariesLoading={state.pastSummariesLoading}
         />
       )}
     </div>
@@ -162,75 +165,151 @@ function RoomsListView({
   loading,
   error,
   onWatch,
+  pastSummaries,
+  pastSummariesLoading,
 }: {
   rooms: RoomInfo[];
   loading: boolean;
   error: string | null;
   onWatch: (name: string) => void;
+  pastSummaries: CallSummaryEntry[];
+  pastSummariesLoading: boolean;
 }) {
   return (
-    <div className="flex-1 w-full max-w-[1600px] mx-auto px-6 py-10">
-      <div className="flex items-center justify-between mb-6">
-        <h2 className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500 flex items-center gap-2">
-          <Radio className="h-3.5 w-3.5 text-teal-400 animate-pulse" />
-          Active Calls
-          <span className="ml-1 px-1.5 py-0.5 bg-slate-800 rounded text-[10px] text-slate-400 font-mono">
-            {rooms.length}
-          </span>
-        </h2>
-        <p className="text-[10px] text-slate-600">Auto-refreshes every 3 s</p>
+    <div className="flex-1 w-full max-w-[1600px] mx-auto px-6 py-10 flex flex-col gap-10">
+      <div>
+        <div className="flex items-center justify-between mb-6">
+          <h2 className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500 flex items-center gap-2">
+            <Radio className="h-3.5 w-3.5 text-teal-400 animate-pulse" />
+            Active Calls
+            <span className="ml-1 px-1.5 py-0.5 bg-slate-800 rounded text-[10px] text-slate-400 font-mono">
+              {rooms.length}
+            </span>
+          </h2>
+          <p className="text-[10px] text-slate-600">Auto-refreshes every 3 s</p>
+        </div>
+
+        {error && (
+          <div className="mb-6 p-3 rounded-xl bg-red-500/5 border border-red-500/10 text-red-400 text-xs">
+            {error}
+          </div>
+        )}
+
+        {loading ? (
+          <div className="py-20 flex flex-col items-center justify-center text-center">
+            <Loader2 className="h-7 w-7 text-teal-500 animate-spin mb-3" />
+            <p className="text-xs text-slate-500">Loading active rooms…</p>
+          </div>
+        ) : rooms.length === 0 ? (
+          <div className="py-20 flex flex-col items-center justify-center text-center border border-dashed border-slate-800/80 rounded-2xl bg-slate-900/10">
+            <Users className="h-10 w-10 text-slate-700 mb-3" />
+            <h3 className="text-sm font-semibold text-slate-300 mb-1">No Active Calls</h3>
+            <p className="text-xs text-slate-500 max-w-xs">
+              Start a call from the caller portal and it will appear here for live monitoring.
+            </p>
+            <Link
+              href="/"
+              className="mt-4 text-xs text-teal-400 hover:text-teal-300 underline underline-offset-2"
+            >
+              Go to caller portal
+            </Link>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {rooms.map((room) => (
+              <div
+                key={room.name}
+                className="group p-5 rounded-2xl bg-slate-900/50 border border-slate-800/60 hover:border-teal-500/20 hover:bg-slate-900/80 transition-all duration-300"
+              >
+                <div className="flex items-center justify-between mb-4">
+                  <span className="px-2 py-0.5 text-[10px] font-mono text-teal-400 bg-teal-500/10 rounded-md">
+                    {room.name}
+                  </span>
+                  <span className="text-[10px] text-slate-500 flex items-center gap-1">
+                    <Users className="h-3 w-3" />
+                    {room.numParticipants}
+                  </span>
+                </div>
+                <button
+                  onClick={() => onWatch(room.name)}
+                  className="w-full py-2 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 bg-slate-800 hover:bg-teal-600 text-slate-300 hover:text-white border border-slate-700/50 hover:border-teal-500 transition-all duration-200 active:scale-[0.97]"
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                  Watch Live
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
-      {error && (
-        <div className="mb-6 p-3 rounded-xl bg-red-500/5 border border-red-500/10 text-red-400 text-xs">
-          {error}
-        </div>
-      )}
+      <div className="border-t border-slate-800/60 pt-10">
+        <h2 className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500 flex items-center gap-2 mb-6">
+          <Sparkles className="h-3.5 w-3.5 text-teal-400" />
+          Past Call Summaries
+          <span className="ml-1 px-1.5 py-0.5 bg-slate-800 rounded text-[10px] text-slate-400 font-mono">
+            {pastSummaries?.length || 0}
+          </span>
+        </h2>
 
-      {loading ? (
-        <div className="py-32 flex flex-col items-center justify-center text-center">
-          <Loader2 className="h-7 w-7 text-teal-500 animate-spin mb-3" />
-          <p className="text-xs text-slate-500">Loading active rooms…</p>
+        {pastSummariesLoading ? (
+          <div className="py-12 flex flex-col items-center justify-center">
+            <Loader2 className="h-5 w-5 text-teal-500 animate-spin mb-2" />
+            <p className="text-xs text-slate-500">Loading call history…</p>
+          </div>
+        ) : !pastSummaries || pastSummaries.length === 0 ? (
+          <div className="py-12 text-center text-xs text-slate-600 border border-dashed border-slate-800/60 rounded-2xl bg-slate-900/10">
+            No past call summaries found. Completed calls will save summaries here automatically.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {pastSummaries.map((sum) => (
+              <PastSummaryCard key={sum.id} summary={sum} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PastSummaryCard({ summary }: { summary: CallSummaryEntry }) {
+  const [showTranscript, setShowTranscript] = useState(false);
+  const formattedDate = summary.created_at
+    ? new Date(summary.created_at).toLocaleString()
+    : "Date unknown";
+
+  return (
+    <div className="p-5 rounded-2xl bg-slate-900/40 border border-slate-800/60 flex flex-col justify-between hover:border-slate-700/60 hover:bg-slate-900/60 transition-all duration-200">
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <span className="px-2 py-0.5 text-[9px] font-mono text-teal-400 bg-teal-500/10 rounded">
+            {summary.room_name}
+          </span>
+          <span className="text-[9px] text-slate-500 font-mono">{formattedDate}</span>
         </div>
-      ) : rooms.length === 0 ? (
-        <div className="py-32 flex flex-col items-center justify-center text-center">
-          <Users className="h-10 w-10 text-slate-700 mb-3" />
-          <h3 className="text-sm font-semibold text-slate-300 mb-1">No Active Calls</h3>
-          <p className="text-xs text-slate-500 max-w-xs">
-            Start a call from the caller portal and it will appear here for live monitoring.
-          </p>
-          <Link
-            href="/"
-            className="mt-4 text-xs text-teal-400 hover:text-teal-300 underline underline-offset-2"
+        <p className="text-xs text-slate-300 leading-relaxed mb-4">{summary.summary}</p>
+      </div>
+
+      {summary.transcript && summary.transcript.length > 0 && (
+        <div className="mt-2 border-t border-slate-800/40 pt-3">
+          <button
+            onClick={() => setShowTranscript(!showTranscript)}
+            className="text-[10px] text-teal-400 hover:text-teal-300 font-semibold flex items-center gap-1 transition-colors"
           >
-            Go to caller portal
-          </Link>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {rooms.map((room) => (
-            <div
-              key={room.name}
-              className="group p-5 rounded-2xl bg-slate-900/50 border border-slate-800/60 hover:border-teal-500/20 hover:bg-slate-900/80 transition-all duration-300"
-            >
-              <div className="flex items-center justify-between mb-4">
-                <span className="px-2 py-0.5 text-[10px] font-mono text-teal-400 bg-teal-500/10 rounded-md">
-                  {room.name}
-                </span>
-                <span className="text-[10px] text-slate-500 flex items-center gap-1">
-                  <Users className="h-3 w-3" />
-                  {room.numParticipants}
-                </span>
-              </div>
-              <button
-                onClick={() => onWatch(room.name)}
-                className="w-full py-2 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 bg-slate-800 hover:bg-teal-600 text-slate-300 hover:text-white border border-slate-700/50 hover:border-teal-500 transition-all duration-200 active:scale-[0.97]"
-              >
-                <Eye className="h-3.5 w-3.5" />
-                Watch Live
-              </button>
+            {showTranscript ? "Hide Transcript" : "View Full Transcript"}
+          </button>
+          
+          {showTranscript && (
+            <div className="mt-3 p-3 rounded-xl bg-slate-950/60 border border-slate-800 max-h-40 overflow-y-auto space-y-1.5">
+              {summary.transcript.map((t: any, idx: number) => (
+                <p key={idx} className="text-[10px] text-slate-400 leading-normal">
+                  <span className="font-semibold text-slate-300 capitalize">{t.speaker}:</span>{" "}
+                  {t.text}
+                </p>
+              ))}
             </div>
-          ))}
+          )}
         </div>
       )}
     </div>
@@ -257,8 +336,13 @@ function ConnectedDashboard({
     };
   }, [room, actions]);
 
+  useEffect(() => {
+    if (localParticipant && !state.isTakenOver) {
+      void localParticipant.setMicrophoneEnabled(false);
+    }
+  }, [localParticipant, state.roomName, state.isTakenOver]);
+
   const executeTakeover = useCallback(async () => {
-    actions.requestTakeover();
     try {
       await room.localParticipant.publishData(
         JSON.stringify({ type: "takeover_request" }),
@@ -272,12 +356,18 @@ function ConnectedDashboard({
     } catch (e) {
       console.error("Failed to enable mic:", e);
     }
-  }, [room, localParticipant, actions]);
+  }, [room, localParticipant]);
 
   useEffect(() => {
-    actions.registerTakeoverHandler(executeTakeover);
-    return () => actions.registerTakeoverHandler(null);
+    actions.registerTakeoverExecute(executeTakeover);
+    return () => actions.registerTakeoverExecute(null);
   }, [actions, executeTakeover]);
+
+  useEffect(() => {
+    if (state.isTakenOver && localParticipant && !isMicrophoneEnabled) {
+      void localParticipant.setMicrophoneEnabled(true);
+    }
+  }, [state.isTakenOver, localParticipant, isMicrophoneEnabled]);
 
   const toggleMic = useCallback(async () => {
     if (localParticipant) {
@@ -365,7 +455,7 @@ function ConnectedDashboard({
         {!state.isTakenOver && state.callStatus !== "ended" && state.callStatus !== "disconnected" && (
           <div className="p-5 mt-auto">
             <button
-              onClick={executeTakeover}
+              onClick={() => void actions.triggerTakeover()}
               className="w-full py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 text-white shadow-lg shadow-rose-600/10 hover:shadow-rose-600/20 active:scale-[0.97] transition-all duration-200"
             >
               <UserRoundPlus className="h-4 w-4" />
@@ -379,7 +469,11 @@ function ConnectedDashboard({
       </aside>
 
       {state.summary && (
-        <SummaryModal summary={state.summary} onClose={() => actions.setCallStatus("ended")} />
+        <SummaryModal
+          summary={state.summary}
+          transcript={state.transcript}
+          onClose={() => actions.setCallStatus("ended")}
+        />
       )}
     </div>
   );
@@ -564,23 +658,49 @@ function TranscriptPanel({ transcript }: { transcript: TranscriptEntry[] }) {
   );
 }
 
-function SummaryModal({ summary, onClose }: { summary: string; onClose: () => void }) {
+function SummaryModal({
+  summary,
+  transcript,
+  onClose,
+}: {
+  summary: string;
+  transcript: TranscriptEntry[];
+  onClose: () => void;
+}) {
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
 
-      <div className="relative z-10 w-full max-w-lg mx-4 bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden">
-        <div className="h-1 bg-gradient-to-r from-teal-500 via-cyan-500 to-emerald-500" />
+      <div className="relative z-10 w-full max-w-lg mx-4 bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden max-h-[85vh] flex flex-col">
+        <div className="h-1 bg-gradient-to-r from-teal-500 via-cyan-500 to-emerald-500 shrink-0" />
 
-        <div className="p-8">
+        <div className="p-8 overflow-y-auto">
           <div className="flex items-center gap-2 mb-4">
             <Sparkles className="h-5 w-5 text-amber-400" />
             <h3 className="text-lg font-bold text-white">Post-Call Summary</h3>
           </div>
 
-          <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 mb-6">
+          <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 mb-4">
             <p className="text-sm text-slate-300 leading-relaxed">{summary}</p>
           </div>
+
+          {transcript.length > 0 && (
+            <div className="mb-6">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-2">
+                Full Transcript
+              </p>
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 max-h-48 overflow-y-auto space-y-2">
+                {transcript.map((entry, i) => (
+                  <p key={i} className="text-xs text-slate-400">
+                    <span className="font-semibold text-slate-300">
+                      {entry.speaker === "agent" ? "Agent" : "Caller"}:
+                    </span>{" "}
+                    {entry.text}
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
 
           <button
             onClick={onClose}

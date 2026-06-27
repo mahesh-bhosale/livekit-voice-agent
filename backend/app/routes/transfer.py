@@ -1,11 +1,30 @@
-"""Twilio webhook endpoints for warm-transfer DTMF accept/decline."""
+"""Twilio webhook endpoints and warm-transfer initiation API."""
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 
-from app.services.transfer import resolve_transfer
+from app.config import settings
+from app.services.transfer import initiate_warm_transfer, resolve_transfer
 
 router = APIRouter()
+
+
+class TransferInitiateRequest(BaseModel):
+    room_name: str = Field(..., description="LiveKit room name")
+    reason: str = Field(..., description="Why the caller wants a human")
+    summary: str = Field(..., description="Spoken summary for the human agent")
+
+
+@router.post("/transfer/initiate")
+async def transfer_initiate(body: TransferInitiateRequest):
+    """Start outbound Twilio call and block until the human agent accepts or declines."""
+    outcome = await initiate_warm_transfer(body.room_name, body.reason, body.summary)
+    return {"outcome": outcome}
+
+
+def _public_api_base() -> str:
+    return settings.PUBLIC_API_URL.rstrip("/")
 
 
 def _twiml(content: str) -> Response:
@@ -18,7 +37,9 @@ async def transfer_twiml(
     reason: str = Query("General assistance"),
     summary: str = Query("A caller needs help."),
 ):
-    gather_action = f"/api/transfer/gather?room={room}"
+    from urllib.parse import quote
+
+    gather_action = f"{_public_api_base()}/api/transfer/gather?room={quote(room)}"
     spoken = (
         f"Hello, this is ClinicConnect Voice. "
         f"A caller needs assistance. {reason}. "

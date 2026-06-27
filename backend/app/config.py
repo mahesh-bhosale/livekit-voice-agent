@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # Public URL for Twilio webhooks (use ngrok in local dev)
     PUBLIC_API_URL: str = "http://localhost:8000"
 
+    # Used by the agent worker to reach this FastAPI server
+    BACKEND_API_URL: str = "http://localhost:8000"
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
