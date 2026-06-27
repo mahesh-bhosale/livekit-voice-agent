@@ -136,6 +136,7 @@ class ClinicBookingAssistant(Agent):
         self.transcript_turns = transcript_turns
         self.takeover_event = takeover_event
         self.on_takeover = on_takeover
+        self.transfer_in_progress = False
 
     @function_tool
     async def check_availability(self, date: str, time: str) -> dict:
@@ -193,6 +194,13 @@ class ClinicBookingAssistant(Agent):
     @function_tool
     async def request_human_transfer(self, reason: str) -> dict:
         """Transfer the caller to a human agent when they ask for a person or have billing/complaint issues."""
+        if self.transfer_in_progress:
+            logger.info("request_human_transfer ignored: transfer already in progress")
+            return {
+                "status": "in_progress",
+                "message": "A transfer call is already active. Please wait.",
+            }
+        self.transfer_in_progress = True
         logger.info(f"request_human_transfer: {reason}")
 
         await send_custom_data(self.room, {"type": "intent", "intent": "transfer_request"})
@@ -219,6 +227,9 @@ class ClinicBookingAssistant(Agent):
                     "and that a team member will join shortly."
                 ),
             }
+
+        # Clear flag as transfer failed
+        self.transfer_in_progress = False
 
         await send_call_status(self.room, "connected")
         await send_custom_data(
