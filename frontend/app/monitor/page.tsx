@@ -21,6 +21,8 @@ import {
   RefreshCw,
   Sparkles,
   UserRoundPlus,
+  CalendarCheck,
+  PhoneForwarded,
 } from "lucide-react";
 import Link from "next/link";
 import {
@@ -36,9 +38,10 @@ import {
   type CallStatus,
   type TranscriptEntry,
   type RoomInfo,
+  type BookingData,
 } from "@/lib/useMonitor";
+import { APP_NAME } from "@/lib/branding";
 
-// ── Status badge color map ─────────────────────────────────────────
 function statusConfig(status: CallStatus) {
   switch (status) {
     case "connected":
@@ -47,6 +50,8 @@ function statusConfig(status: CallStatus) {
       return { label: "Connecting", bg: "bg-blue-500/15", text: "text-blue-400", dot: "bg-blue-400" };
     case "transferring":
       return { label: "Transferring", bg: "bg-amber-500/15", text: "text-amber-400", dot: "bg-amber-400" };
+    case "transfer_connected":
+      return { label: "Human Connected", bg: "bg-teal-500/15", text: "text-teal-400", dot: "bg-teal-400" };
     case "ended":
       return { label: "Call Ended", bg: "bg-slate-500/15", text: "text-slate-400", dot: "bg-slate-500" };
     case "takeover":
@@ -56,7 +61,6 @@ function statusConfig(status: CallStatus) {
   }
 }
 
-// ── Agent state indicator config ───────────────────────────────────
 function agentStateConfig(state: AgentState) {
   switch (state) {
     case "listening":
@@ -70,19 +74,13 @@ function agentStateConfig(state: AgentState) {
   }
 }
 
-// ════════════════════════════════════════════════════════════════════
-// MAIN PAGE COMPONENT
-// ════════════════════════════════════════════════════════════════════
 export default function MonitorPage() {
   const [state, actions] = useMonitor();
 
-  // If we have a token + url, render the LiveKitRoom wrapper; otherwise show the rooms list.
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
-      {/* ── Header ──────────────────────────────────────────────── */}
       <header className="border-b border-slate-800/60 bg-slate-950/90 backdrop-blur-xl sticky top-0 z-50">
         <div className="w-full max-w-[1600px] mx-auto px-6 h-14 flex items-center justify-between">
-          {/* Left */}
           <div className="flex items-center gap-3">
             <Link
               href="/"
@@ -91,10 +89,15 @@ export default function MonitorPage() {
               <ArrowLeft className="h-4 w-4" />
             </Link>
             <div className="h-5 w-px bg-slate-800" />
-            <Headphones className="h-4 w-4 text-indigo-400" />
-            <span className="text-sm font-semibold text-white tracking-tight">
-              {state.roomName ? state.roomName : "Live Monitor"}
-            </span>
+            <Headphones className="h-4 w-4 text-teal-400" />
+            <div className="flex flex-col">
+              <span className="text-sm font-semibold text-white tracking-tight leading-tight">
+                {state.roomName ? state.roomName : `${APP_NAME} Monitor`}
+              </span>
+              {!state.roomName && (
+                <span className="text-[10px] text-slate-500">Live call supervision dashboard</span>
+              )}
+            </div>
             {state.roomName && (
               <>
                 <div className="h-5 w-px bg-slate-800 hidden sm:block" />
@@ -103,7 +106,6 @@ export default function MonitorPage() {
             )}
           </div>
 
-          {/* Right */}
           <div className="flex items-center gap-3">
             {!state.token && (
               <button
@@ -130,11 +132,10 @@ export default function MonitorPage() {
         </div>
       </header>
 
-      {/* ── Body ────────────────────────────────────────────────── */}
       {state.token && state.url ? (
         <LiveKitRoom
           video={false}
-          audio={state.isTakenOver}
+          audio={true}
           token={state.token}
           serverUrl={state.url}
           onDisconnected={actions.stopWatching}
@@ -156,9 +157,6 @@ export default function MonitorPage() {
   );
 }
 
-// ════════════════════════════════════════════════════════════════════
-// ROOMS LIST VIEW (no room selected)
-// ════════════════════════════════════════════════════════════════════
 function RoomsListView({
   rooms,
   loading,
@@ -174,13 +172,13 @@ function RoomsListView({
     <div className="flex-1 w-full max-w-[1600px] mx-auto px-6 py-10">
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500 flex items-center gap-2">
-          <Radio className="h-3.5 w-3.5 text-indigo-400 animate-pulse" />
-          Active Channels
+          <Radio className="h-3.5 w-3.5 text-teal-400 animate-pulse" />
+          Active Calls
           <span className="ml-1 px-1.5 py-0.5 bg-slate-800 rounded text-[10px] text-slate-400 font-mono">
             {rooms.length}
           </span>
         </h2>
-        <p className="text-[10px] text-slate-600">Polling every 3 s</p>
+        <p className="text-[10px] text-slate-600">Auto-refreshes every 3 s</p>
       </div>
 
       {error && (
@@ -191,26 +189,32 @@ function RoomsListView({
 
       {loading ? (
         <div className="py-32 flex flex-col items-center justify-center text-center">
-          <Loader2 className="h-7 w-7 text-indigo-500 animate-spin mb-3" />
-          <p className="text-xs text-slate-500">Loading rooms…</p>
+          <Loader2 className="h-7 w-7 text-teal-500 animate-spin mb-3" />
+          <p className="text-xs text-slate-500">Loading active rooms…</p>
         </div>
       ) : rooms.length === 0 ? (
         <div className="py-32 flex flex-col items-center justify-center text-center">
           <Users className="h-10 w-10 text-slate-700 mb-3" />
           <h3 className="text-sm font-semibold text-slate-300 mb-1">No Active Calls</h3>
           <p className="text-xs text-slate-500 max-w-xs">
-            Start a call from the landing page and it will appear here automatically.
+            Start a call from the caller portal and it will appear here for live monitoring.
           </p>
+          <Link
+            href="/"
+            className="mt-4 text-xs text-teal-400 hover:text-teal-300 underline underline-offset-2"
+          >
+            Go to caller portal
+          </Link>
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           {rooms.map((room) => (
             <div
               key={room.name}
-              className="group p-5 rounded-2xl bg-slate-900/50 border border-slate-800/60 hover:border-indigo-500/20 hover:bg-slate-900/80 transition-all duration-300"
+              className="group p-5 rounded-2xl bg-slate-900/50 border border-slate-800/60 hover:border-teal-500/20 hover:bg-slate-900/80 transition-all duration-300"
             >
               <div className="flex items-center justify-between mb-4">
-                <span className="px-2 py-0.5 text-[10px] font-mono text-indigo-400 bg-indigo-500/10 rounded-md">
+                <span className="px-2 py-0.5 text-[10px] font-mono text-teal-400 bg-teal-500/10 rounded-md">
                   {room.name}
                 </span>
                 <span className="text-[10px] text-slate-500 flex items-center gap-1">
@@ -218,10 +222,9 @@ function RoomsListView({
                   {room.numParticipants}
                 </span>
               </div>
-              <p className="text-[9px] text-slate-600 font-mono mb-5 truncate">SID: {room.sid}</p>
               <button
                 onClick={() => onWatch(room.name)}
-                className="w-full py-2 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 bg-slate-800 hover:bg-indigo-600 text-slate-300 hover:text-white border border-slate-700/50 hover:border-indigo-500 transition-all duration-200 active:scale-[0.97]"
+                className="w-full py-2 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 bg-slate-800 hover:bg-teal-600 text-slate-300 hover:text-white border border-slate-700/50 hover:border-teal-500 transition-all duration-200 active:scale-[0.97]"
               >
                 <Eye className="h-3.5 w-3.5" />
                 Watch Live
@@ -234,9 +237,6 @@ function RoomsListView({
   );
 }
 
-// ════════════════════════════════════════════════════════════════════
-// CONNECTED DASHBOARD (room is active)
-// ════════════════════════════════════════════════════════════════════
 function ConnectedDashboard({
   state,
   actions,
@@ -247,7 +247,6 @@ function ConnectedDashboard({
   const room = useRoomContext();
   const { localParticipant, isMicrophoneEnabled } = useLocalParticipant();
 
-  // Subscribe to DataReceived events and forward to our state hook
   useEffect(() => {
     const handler = (payload: Uint8Array) => {
       actions.handleDataMessage(payload);
@@ -258,25 +257,27 @@ function ConnectedDashboard({
     };
   }, [room, actions]);
 
-  // Takeover: publish data message and enable mic
   const executeTakeover = useCallback(async () => {
     actions.requestTakeover();
     try {
-      // Notify the agent worker to pause (requires worker.py support — see comments in worker.py)
       await room.localParticipant.publishData(
         JSON.stringify({ type: "takeover_request" }),
-        { reliable: true }
+        { reliable: true },
       );
     } catch (e) {
       console.error("Failed to publish takeover request:", e);
     }
-    // Enable our own mic so we can talk to the caller
     try {
       await localParticipant.setMicrophoneEnabled(true);
     } catch (e) {
       console.error("Failed to enable mic:", e);
     }
   }, [room, localParticipant, actions]);
+
+  useEffect(() => {
+    actions.registerTakeoverHandler(executeTakeover);
+    return () => actions.registerTakeoverHandler(null);
+  }, [actions, executeTakeover]);
 
   const toggleMic = useCallback(async () => {
     if (localParticipant) {
@@ -291,9 +292,11 @@ function ConnectedDashboard({
 
   return (
     <div className="flex-1 flex flex-col lg:flex-row w-full max-w-[1600px] mx-auto relative">
-      {/* ── Main: Transcript Panel ─────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Takeover banner */}
+        {state.transferResult && state.callStatus !== "takeover" && (
+          <TransferBanner result={state.transferResult} />
+        )}
+
         {state.isTakenOver && (
           <div className="px-6 py-3 bg-rose-500/10 border-b border-rose-500/20 flex items-center justify-between gap-4">
             <div className="flex items-center gap-2">
@@ -325,40 +328,40 @@ function ConnectedDashboard({
           </div>
         )}
 
-        {/* Transcript area */}
         <TranscriptPanel transcript={state.transcript} />
       </div>
 
-      {/* ── Sidebar ─────────────────────────────────────────── */}
       <aside className="w-full lg:w-80 xl:w-96 border-t lg:border-t-0 lg:border-l border-slate-800/60 flex flex-col shrink-0">
-        {/* Agent state */}
         <div className="p-5 border-b border-slate-800/60">
           <SectionLabel text="Agent State" />
           <AgentStatePill state={state.agentState} />
         </div>
 
-        {/* Intent */}
         <div className="p-5 border-b border-slate-800/60">
           <SectionLabel text="Detected Intent" />
           <IntentBadge intent={state.intent} />
         </div>
 
-        {/* Action */}
         <div className="p-5 border-b border-slate-800/60">
           <SectionLabel text="Current Action" />
           <ActionLine action={state.action} />
         </div>
 
-        {/* Participants count */}
+        {state.bookingData && (
+          <div className="p-5 border-b border-slate-800/60">
+            <SectionLabel text="Booking Details" />
+            <BookingCard data={state.bookingData} />
+          </div>
+        )}
+
         <div className="p-5 border-b border-slate-800/60">
           <SectionLabel text="Room Info" />
           <div className="mt-2 flex items-center gap-2 text-xs text-slate-400">
             <Users className="h-3.5 w-3.5" />
-            <span>{state.roomName || "—"}</span>
+            <span className="font-mono">{state.roomName || "—"}</span>
           </div>
         </div>
 
-        {/* Takeover CTA (only if not already taken over and call is live) */}
         {!state.isTakenOver && state.callStatus !== "ended" && state.callStatus !== "disconnected" && (
           <div className="p-5 mt-auto">
             <button
@@ -369,21 +372,53 @@ function ConnectedDashboard({
               Take Over Call
             </button>
             <p className="text-[9px] text-slate-600 text-center mt-2">
-              This will pause the AI agent and connect your microphone to the caller.
+              Pauses the AI agent and connects your microphone to the caller.
             </p>
           </div>
         )}
       </aside>
 
-      {/* ── Summary Modal ───────────────────────────────────── */}
-      {state.summary && <SummaryModal summary={state.summary} onClose={() => actions.setCallStatus("ended")} />}
+      {state.summary && (
+        <SummaryModal summary={state.summary} onClose={() => actions.setCallStatus("ended")} />
+      )}
     </div>
   );
 }
 
-// ════════════════════════════════════════════════════════════════════
-// SUB-COMPONENTS
-// ════════════════════════════════════════════════════════════════════
+function TransferBanner({ result }: { result: string }) {
+  const accepted = result === "accepted";
+  return (
+    <div
+      className={`px-6 py-3 border-b flex items-center gap-2 text-xs font-medium ${
+        accepted
+          ? "bg-teal-500/10 border-teal-500/20 text-teal-300"
+          : "bg-amber-500/10 border-amber-500/20 text-amber-300"
+      }`}
+    >
+      <PhoneForwarded className="h-4 w-4 shrink-0" />
+      {accepted
+        ? "Warm transfer accepted — human agent is being connected."
+        : result === "declined"
+          ? "Warm transfer declined — human agent unavailable."
+          : "Warm transfer could not be completed."}
+    </div>
+  );
+}
+
+function BookingCard({ data }: { data: BookingData }) {
+  return (
+    <div className="mt-2 p-3 rounded-xl bg-slate-900 border border-slate-800 text-xs space-y-1.5">
+      <div className="flex items-center gap-1.5 text-teal-400 font-semibold mb-2">
+        <CalendarCheck className="h-3.5 w-3.5" />
+        Confirmed
+      </div>
+      <p><span className="text-slate-500">Name:</span> {data.name}</p>
+      <p><span className="text-slate-500">Reason:</span> {data.reason}</p>
+      <p><span className="text-slate-500">When:</span> {data.date} at {data.time}</p>
+      <p><span className="text-slate-500">Phone:</span> {data.phone}</p>
+    </div>
+  );
+}
 
 function SectionLabel({ text }: { text: string }) {
   return (
@@ -391,26 +426,32 @@ function SectionLabel({ text }: { text: string }) {
   );
 }
 
-// ── Status badge ───────────────────────────────────────────────────
 function StatusBadge({ status }: { status: CallStatus }) {
   const cfg = statusConfig(status);
   return (
     <span
       className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold ${cfg.bg} ${cfg.text}`}
     >
-      <span className={`h-1.5 w-1.5 rounded-full ${cfg.dot} ${status === "connected" || status === "takeover" ? "animate-pulse" : ""}`} />
+      <span
+        className={`h-1.5 w-1.5 rounded-full ${cfg.dot} ${
+          status === "connected" || status === "takeover" || status === "transferring" ? "animate-pulse" : ""
+        }`}
+      />
       {cfg.label}
     </span>
   );
 }
 
-// ── Agent state animated pill ──────────────────────────────────────
 function AgentStatePill({ state }: { state: AgentState }) {
   const cfg = agentStateConfig(state);
   const Icon = cfg.icon;
   return (
     <div className="flex items-center gap-3 mt-1">
-      <div className={`h-9 w-9 rounded-xl ${cfg.color} ${cfg.glow} shadow-lg flex items-center justify-center ${state !== "idle" ? "animate-pulse" : ""}`}>
+      <div
+        className={`h-9 w-9 rounded-xl ${cfg.color} ${cfg.glow} shadow-lg flex items-center justify-center ${
+          state !== "idle" ? "animate-pulse" : ""
+        }`}
+      >
         <Icon className="h-4 w-4 text-white" />
       </div>
       <span className="text-sm font-semibold text-slate-200">{cfg.label}</span>
@@ -418,7 +459,6 @@ function AgentStatePill({ state }: { state: AgentState }) {
   );
 }
 
-// ── Intent badge ───────────────────────────────────────────────────
 function IntentBadge({ intent }: { intent: string }) {
   const isBooking = intent === "booking";
   const isTransfer = intent === "transfer_request";
@@ -428,38 +468,40 @@ function IntentBadge({ intent }: { intent: string }) {
       <span
         className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border ${
           isBooking
-            ? "bg-indigo-500/10 border-indigo-500/20 text-indigo-400"
+            ? "bg-teal-500/10 border-teal-500/20 text-teal-400"
             : isTransfer
               ? "bg-amber-500/10 border-amber-500/20 text-amber-400"
               : "bg-slate-800 border-slate-700/60 text-slate-400"
         }`}
       >
-        {isBooking ? <Target className="h-3 w-3" /> : isTransfer ? <Zap className="h-3 w-3" /> : <ShieldCheck className="h-3 w-3" />}
+        {isBooking ? (
+          <Target className="h-3 w-3" />
+        ) : isTransfer ? (
+          <Zap className="h-3 w-3" />
+        ) : (
+          <ShieldCheck className="h-3 w-3" />
+        )}
         {intent.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
       </span>
     </div>
   );
 }
 
-// ── Action line with spinner ───────────────────────────────────────
 function ActionLine({ action }: { action: string }) {
   if (!action) {
     return <p className="mt-1 text-xs text-slate-600 italic">No active action</p>;
   }
 
-  const label = action
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+  const label = action.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
   return (
     <div className="mt-1 flex items-center gap-2">
-      <Loader2 className="h-3.5 w-3.5 text-indigo-400 animate-spin shrink-0" />
+      <Loader2 className="h-3.5 w-3.5 text-teal-400 animate-spin shrink-0" />
       <span className="text-xs text-slate-300 font-medium">{label}…</span>
     </div>
   );
 }
 
-// ── Take over button (header version) ──────────────────────────────
 function TakeoverButton({ onTakeover }: { onTakeover: () => void }) {
   return (
     <button
@@ -472,7 +514,6 @@ function TakeoverButton({ onTakeover }: { onTakeover: () => void }) {
   );
 }
 
-// ── Transcript panel ───────────────────────────────────────────────
 function TranscriptPanel({ transcript }: { transcript: TranscriptEntry[] }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -509,7 +550,7 @@ function TranscriptPanel({ transcript }: { transcript: TranscriptEntry[] }) {
               <div
                 className={`px-4 py-2.5 rounded-2xl text-[13px] leading-relaxed ${
                   isAgent
-                    ? "bg-indigo-600 text-white rounded-br-sm"
+                    ? "bg-teal-600 text-white rounded-br-sm"
                     : "bg-slate-800 text-slate-100 border border-slate-700/40 rounded-bl-sm"
                 }`}
               >
@@ -523,22 +564,18 @@ function TranscriptPanel({ transcript }: { transcript: TranscriptEntry[] }) {
   );
 }
 
-// ── Summary modal ──────────────────────────────────────────────────
 function SummaryModal({ summary, onClose }: { summary: string; onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center">
-      {/* Overlay */}
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
 
-      {/* Card */}
       <div className="relative z-10 w-full max-w-lg mx-4 bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden">
-        {/* Decorative gradient strip */}
-        <div className="h-1 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500" />
+        <div className="h-1 bg-gradient-to-r from-teal-500 via-cyan-500 to-emerald-500" />
 
         <div className="p-8">
           <div className="flex items-center gap-2 mb-4">
             <Sparkles className="h-5 w-5 text-amber-400" />
-            <h3 className="text-lg font-bold text-white">Call Summary</h3>
+            <h3 className="text-lg font-bold text-white">Post-Call Summary</h3>
           </div>
 
           <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 mb-6">

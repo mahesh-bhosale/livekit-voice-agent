@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { APP_NAME } from "@/lib/branding";
 import "./globals.css";
 import "@livekit/components-styles";
 
@@ -14,8 +15,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI Voice Assistant - Antigravity Systems",
-  description: "A real-time voice agent and doctor assistant interface utilizing WebRTC, Groq, and Cartesia.",
+  title: `${APP_NAME} — AI Medical Receptionist`,
+  description:
+    "Conversational voice agent with live monitoring, take-over, and warm transfer. Built with LiveKit, Groq, Deepgram, and Twilio.",
 };
 
 export default function RootLayout({

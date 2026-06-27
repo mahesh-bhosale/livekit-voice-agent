@@ -1,23 +1,27 @@
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 class Settings(BaseSettings):
-    LIVEKIT_URL: str = "wss://hackathon-lw9jp9ly.livekit.cloud"
-    LIVEKIT_API_KEY: str = "APIA86zqbMEwV9j"
+    LIVEKIT_URL: str = "wss://your-project.livekit.cloud"
+    LIVEKIT_API_KEY: str = "your_livekit_api_key"
     LIVEKIT_API_SECRET: str = "your_livekit_api_secret"
-    
-    GROQ_API_KEY: str = "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"
-    DEEPGRAM_API_KEY: str = "9f7e21f0d415e8d8fa0f6c293cecd3692230c904"
-    CARTESIA_API_KEY: str = "sk_car_DkVJ6J6C9PNdZdQ5ag7P9p"
-    
-    DATABASE_URL: str = "postgresql://neondb_owner:npg_OKbrtv7uXzU9@ep-curly-union-aoxy6cuo.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require"
-    
+
+    GROQ_API_KEY: str = ""
+    DEEPGRAM_API_KEY: str = ""
+    CARTESIA_API_KEY: str = ""
+    TTS_API_KEY: str = ""
+
+    DATABASE_URL: str = "sqlite:///./voice_agent.db"
+
     TWILIO_ACCOUNT_SID: str | None = None
     TWILIO_AUTH_TOKEN: str | None = None
     TWILIO_FROM_NUMBER: str | None = None
     HUMAN_AGENT_NUMBER: str | None = None
+
+    # Public URL for Twilio webhooks (use ngrok in local dev)
+    PUBLIC_API_URL: str = "http://localhost:8000"
 
     model_config = {
         "env_file": ".env",

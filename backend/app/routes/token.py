@@ -47,8 +47,8 @@ async def mint_token(payload: TokenRequest):
         grants = api.VideoGrants(
             room_join=True,
             room=payload.roomName,
-            can_publish=not payload.isWatcher,
-            can_subscribe=True
+            can_publish=True,
+            can_subscribe=True,
         )
         
         token = token.with_grants(grants)

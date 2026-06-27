@@ -3,7 +3,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { getApiUrl } from "@/lib/livekit-client";
 
-// ── Types ──────────────────────────────────────────────────────────
 export interface RoomInfo {
   name: string;
   sid: string;
@@ -18,30 +17,40 @@ export interface TranscriptEntry {
   timestamp: string;
 }
 
+export interface BookingData {
+  name: string;
+  reason: string;
+  date: string;
+  time: string;
+  phone: string;
+}
+
 export type AgentState = "idle" | "initializing" | "listening" | "thinking" | "speaking";
 
-export type CallStatus = "disconnected" | "connecting" | "connected" | "transferring" | "ended" | "takeover";
+export type CallStatus =
+  | "disconnected"
+  | "connecting"
+  | "connected"
+  | "transferring"
+  | "transfer_connected"
+  | "ended"
+  | "takeover";
 
 export interface MonitorState {
-  // Connection
   token: string | null;
   url: string | null;
   roomName: string | null;
   callStatus: CallStatus;
-
-  // Live feed from data channel
   agentState: AgentState;
   transcript: TranscriptEntry[];
   intent: string;
   action: string;
   summary: string | null;
-
-  // Rooms list
+  transferResult: string | null;
+  bookingData: BookingData | null;
   rooms: RoomInfo[];
   roomsLoading: boolean;
   roomsError: string | null;
-
-  // Takeover mode
   isTakenOver: boolean;
 }
 
@@ -52,9 +61,9 @@ export interface MonitorActions {
   handleDataMessage: (payload: Uint8Array) => void;
   requestTakeover: () => void;
   setCallStatus: (status: CallStatus) => void;
+  registerTakeoverHandler: (handler: (() => void) | null) => void;
 }
 
-// ── Hook ───────────────────────────────────────────────────────────
 export function useMonitor(): [MonitorState, MonitorActions] {
   const [token, setToken] = useState<string | null>(null);
   const [url, setUrl] = useState<string | null>(null);
@@ -66,17 +75,18 @@ export function useMonitor(): [MonitorState, MonitorActions] {
   const [intent, setIntent] = useState<string>("general");
   const [action, setAction] = useState<string>("");
   const [summary, setSummary] = useState<string | null>(null);
+  const [transferResult, setTransferResult] = useState<string | null>(null);
+  const [bookingData, setBookingData] = useState<BookingData | null>(null);
 
   const [rooms, setRooms] = useState<RoomInfo[]>([]);
   const [roomsLoading, setRoomsLoading] = useState(true);
   const [roomsError, setRoomsError] = useState<string | null>(null);
 
   const [isTakenOver, setIsTakenOver] = useState(false);
+  const takeoverHandlerRef = useRef<(() => void) | null>(null);
 
-  // Polling interval ref
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // ── Rooms polling ──
   const fetchRooms = useCallback(async () => {
     try {
       const res = await fetch(getApiUrl("/api/rooms"));
@@ -84,14 +94,13 @@ export function useMonitor(): [MonitorState, MonitorActions] {
       const data = await res.json();
       setRooms(data.rooms || []);
       setRoomsError(null);
-    } catch (err: any) {
-      setRoomsError(err.message);
+    } catch (err: unknown) {
+      setRoomsError(err instanceof Error ? err.message : "Failed to fetch rooms");
     } finally {
       setRoomsLoading(false);
     }
   }, []);
 
-  // Start polling on mount
   useEffect(() => {
     fetchRooms();
     pollRef.current = setInterval(fetchRooms, 3000);
@@ -100,7 +109,6 @@ export function useMonitor(): [MonitorState, MonitorActions] {
     };
   }, [fetchRooms]);
 
-  // ── Watch a room ──
   const watchRoom = useCallback(async (targetRoom: string) => {
     setCallStatus("connecting");
     setSummary(null);
@@ -108,6 +116,8 @@ export function useMonitor(): [MonitorState, MonitorActions] {
     setAgentState("idle");
     setIntent("general");
     setAction("");
+    setTransferResult(null);
+    setBookingData(null);
     setIsTakenOver(false);
 
     try {
@@ -132,14 +142,13 @@ export function useMonitor(): [MonitorState, MonitorActions] {
       setUrl(data.url);
       setRoomName(targetRoom);
       setCallStatus("connected");
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error("Watch error:", err);
       setCallStatus("disconnected");
-      setRoomsError(err.message);
+      setRoomsError(err instanceof Error ? err.message : "Failed to watch room");
     }
   }, []);
 
-  // ── Stop watching ──
   const stopWatching = useCallback(() => {
     setToken(null);
     setUrl(null);
@@ -150,10 +159,12 @@ export function useMonitor(): [MonitorState, MonitorActions] {
     setAgentState("idle");
     setIntent("general");
     setAction("");
+    setTransferResult(null);
+    setBookingData(null);
     setIsTakenOver(false);
+    takeoverHandlerRef.current = null;
   }, []);
 
-  // ── Data message handler (called from component) ──
   const handleDataMessage = useCallback((payload: Uint8Array) => {
     try {
       const text = new TextDecoder().decode(payload);
@@ -166,7 +177,6 @@ export function useMonitor(): [MonitorState, MonitorActions] {
 
         case "transcript":
           setTranscript((prev) => {
-            // Deduplicate exact matches at tail
             if (prev.length > 0) {
               const last = prev[prev.length - 1];
               if (last.speaker === data.speaker && last.text === data.text) return prev;
@@ -192,7 +202,26 @@ export function useMonitor(): [MonitorState, MonitorActions] {
           break;
 
         case "action":
-          setAction(data.action);
+          setAction(data.action || "");
+          break;
+
+        case "call_status":
+          if (data.status) setCallStatus(data.status as CallStatus);
+          if (data.status === "takeover") setIsTakenOver(true);
+          break;
+
+        case "transfer_result":
+          setTransferResult(data.result);
+          break;
+
+        case "booking_data":
+          setBookingData({
+            name: data.name,
+            reason: data.reason,
+            date: data.date,
+            time: data.time,
+            phone: data.phone,
+          });
           break;
 
         case "summary":
@@ -204,14 +233,21 @@ export function useMonitor(): [MonitorState, MonitorActions] {
           break;
       }
     } catch {
-      // silently ignore non-JSON or malformed packets
+      // ignore malformed packets
     }
   }, []);
 
-  // ── Takeover request ──
   const requestTakeover = useCallback(() => {
-    setIsTakenOver(true);
-    setCallStatus("takeover");
+    if (takeoverHandlerRef.current) {
+      takeoverHandlerRef.current();
+    } else {
+      setIsTakenOver(true);
+      setCallStatus("takeover");
+    }
+  }, []);
+
+  const registerTakeoverHandler = useCallback((handler: (() => void) | null) => {
+    takeoverHandlerRef.current = handler;
   }, []);
 
   const state: MonitorState = {
@@ -224,6 +260,8 @@ export function useMonitor(): [MonitorState, MonitorActions] {
     intent,
     action,
     summary,
+    transferResult,
+    bookingData,
     rooms,
     roomsLoading,
     roomsError,
@@ -237,6 +275,7 @@ export function useMonitor(): [MonitorState, MonitorActions] {
     handleDataMessage,
     requestTakeover,
     setCallStatus,
+    registerTakeoverHandler,
   };
 
   return [state, actions];

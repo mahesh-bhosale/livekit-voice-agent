@@ -1,5 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, func
 from app.db import Base
 
 class Appointment(Base):
@@ -32,7 +31,7 @@ class CallSummary(Base):
     id = Column(Integer, primary_key=True, index=True)
     room_name = Column(String, nullable=False)
     summary = Column(Text, nullable=False)
-    transcript = Column(JSONB, nullable=True)  # Stores list of {speaker, text, timestamp} turn objects
+    transcript = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     def to_dict(self):

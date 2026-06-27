@@ -2,11 +2,11 @@ import asyncio
 import json
 import logging
 import os
-import sys
+
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Import LiveKit Agent SDK modules
+from livekit import rtc
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -14,24 +14,25 @@ from livekit.agents import (
     AutoSubscribe,
     ConversationItemAddedEvent,
     JobContext,
-    UserInputTranscribedEvent,
     WorkerOptions,
     cli,
     function_tool,
 )
-from livekit.agents.llm import ChatMessage, ChatRole
+from livekit.agents.llm import ChatMessage
 from livekit.plugins import cartesia, deepgram, groq, silero
 
-# Ensure environment variables are loaded
-load_dotenv()
+from app.services.transfer import build_transfer_summary, initiate_warm_transfer
 
-# Configure logging
+load_dotenv(override=True)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("voice-agent-worker")
 
-# Define the system instructions for the LLM
+AGENT_NAME = "Alex"
+CLINIC_NAME = "Sunrise Clinic"
+
 SYSTEM_PROMPT = (
-    "You are a friendly appointment booking assistant for a small clinic. Your job:\n"
+    f"You are {AGENT_NAME}, a friendly virtual receptionist for {CLINIC_NAME}. Your job:\n"
     "1. Greet the caller warmly.\n"
     "2. If they want to book an appointment, collect: full name, reason for visit, preferred date and time, "
     "and a contact phone number — one at a time, naturally, don't interrogate.\n"
@@ -42,22 +43,25 @@ SYSTEM_PROMPT = (
     "6. Keep responses brief and conversational, like a real phone call."
 )
 
-# Helper function to send JSON messages over the LiveKit data channel
+
 async def send_custom_data(room, data_dict):
     if not room or not room.local_participant:
         return
     try:
         payload = json.dumps(data_dict)
         await room.local_participant.publish_data(payload=payload)
-        logger.debug(f"Broadcasted data channel message: {payload}")
     except Exception as e:
         logger.error(f"Error publishing data channel message: {e}")
 
-# Synchronous DB operation helpers run in worker threads
+
+async def send_call_status(room, status: str):
+    await send_custom_data(room, {"type": "call_status", "status": status})
+
+
 def db_book_appointment(name: str, reason: str, date: str, time: str, phone: str, room_name: str | None) -> dict:
     from app.db import SessionLocal
     from app.models import Appointment
-    
+
     db = SessionLocal()
     try:
         appt = Appointment(
@@ -66,12 +70,12 @@ def db_book_appointment(name: str, reason: str, date: str, time: str, phone: str
             date=date,
             time=time,
             phone=phone,
-            room_name=room_name
+            room_name=room_name,
         )
         db.add(appt)
         db.commit()
         db.refresh(appt)
-        logger.info(f"DB Insert: Booked appointment ID {appt.id} for {name}")
+        logger.info(f"Booked appointment ID {appt.id} for {name}")
         return {"success": True, "appointment_id": appt.id}
     except Exception as e:
         db.rollback()
@@ -80,21 +84,22 @@ def db_book_appointment(name: str, reason: str, date: str, time: str, phone: str
     finally:
         db.close()
 
+
 def db_save_call_summary(room_name: str, summary: str, transcript: list) -> dict:
     from app.db import SessionLocal
     from app.models import CallSummary
-    
+
     db = SessionLocal()
     try:
         call_sum = CallSummary(
             room_name=room_name,
             summary=summary,
-            transcript=transcript
+            transcript=transcript,
         )
         db.add(call_sum)
         db.commit()
         db.refresh(call_sum)
-        logger.info(f"DB Insert: Saved CallSummary ID {call_sum.id} for room {room_name}")
+        logger.info(f"Saved CallSummary ID {call_sum.id} for room {room_name}")
         return {"success": True, "summary_id": call_sum.id}
     except Exception as e:
         db.rollback()
@@ -103,46 +108,43 @@ def db_save_call_summary(room_name: str, summary: str, transcript: list) -> dict
     finally:
         db.close()
 
-# Define the Agent logic class subclassing livekit.agents.Agent
+
 class ClinicBookingAssistant(Agent):
-    def __init__(self, room):
-        super().__init__(
-            instructions=SYSTEM_PROMPT,
-        )
+    def __init__(self, room, transcript_turns: list, takeover_event: asyncio.Event):
+        super().__init__(instructions=SYSTEM_PROMPT)
         self.room = room
+        self.transcript_turns = transcript_turns
+        self.takeover_event = takeover_event
 
     @function_tool
     async def check_availability(self, date: str, time: str) -> dict:
-        """Called to check availability of a preferred date and time slot for an appointment."""
-        logger.info(f"Tool call check_availability: {date} at {time}")
-        
-        # Publish intent and action indicators
+        """Check whether a preferred date and time slot is available for booking."""
+        logger.info(f"check_availability: {date} at {time}")
+
         await send_custom_data(self.room, {"type": "intent", "intent": "booking"})
         await send_custom_data(self.room, {"type": "action", "action": "checking_availability"})
 
         from app.agent.availability import is_slot_booked
+
         booked = is_slot_booked(date, time)
-        
+
+        await send_custom_data(self.room, {"type": "action", "action": ""})
+
         if booked:
-            alt_suggestion = "11:30 AM or 2:00 PM instead"
-            logger.info(f"Slot {date} {time} is booked. Suggesting alternative: {alt_suggestion}")
             return {
                 "available": False,
-                "alternative": f"That slot is not available. How about {alt_suggestion}?"
+                "alternative": "That slot is not available. How about 11:30 AM or 2:00 PM instead?",
             }
-        else:
-            logger.info(f"Slot {date} {time} is available.")
-            return {"available": True, "alternative": None}
+        return {"available": True, "alternative": None}
 
     @function_tool
     async def book_appointment(self, name: str, reason: str, date: str, time: str, phone: str) -> dict:
-        """Called to book a clinic appointment once the slot availability is confirmed and details are gathered."""
-        logger.info(f"Tool call book_appointment: Name={name}, Date={date}, Time={time}")
-        
+        """Book a clinic appointment after availability is confirmed and details are collected."""
+        logger.info(f"book_appointment: {name} on {date} at {time}")
+
         await send_custom_data(self.room, {"type": "intent", "intent": "booking"})
         await send_custom_data(self.room, {"type": "action", "action": "booking"})
 
-        # Wrap blocking database insert in asyncio.to_thread
         res = await asyncio.to_thread(
             db_book_appointment,
             name=name,
@@ -150,169 +152,232 @@ class ClinicBookingAssistant(Agent):
             date=date,
             time=time,
             phone=phone,
-            room_name=self.room.name
+            room_name=self.room.name,
+        )
+
+        await send_custom_data(self.room, {"type": "action", "action": ""})
+        await send_custom_data(
+            self.room,
+            {
+                "type": "booking_data",
+                "name": name,
+                "reason": reason,
+                "date": date,
+                "time": time,
+                "phone": phone,
+            },
         )
         return res
 
     @function_tool
     async def request_human_transfer(self, reason: str) -> dict:
-        """Called when the caller expresses frustration, complains, has a billing issue, or explicitly asks for a human agent."""
-        logger.info(f"Tool call request_human_transfer. Reason: {reason}")
-        
+        """Transfer the caller to a human agent when they ask for a person or have billing/complaint issues."""
+        logger.info(f"request_human_transfer: {reason}")
+
         await send_custom_data(self.room, {"type": "intent", "intent": "transfer_request"})
         await send_custom_data(self.room, {"type": "action", "action": "transferring"})
+        await send_call_status(self.room, "transferring")
 
-        # In a real app this would route to a SIP trunk or Twilio conference call
+        summary = build_transfer_summary(reason, self.transcript_turns)
+        outcome = await initiate_warm_transfer(self.room.name, reason, summary)
+
+        await send_custom_data(self.room, {"type": "action", "action": ""})
+
+        if outcome == "accepted":
+            await send_call_status(self.room, "transfer_connected")
+            await send_custom_data(
+                self.room,
+                {"type": "transfer_result", "result": "accepted", "message": "Human agent accepted the call."},
+            )
+            return {
+                "status": "accepted",
+                "message": (
+                    "The human agent accepted. Tell the caller you are connecting them now "
+                    "and that a team member will join shortly."
+                ),
+            }
+
+        await send_call_status(self.room, "connected")
+        await send_custom_data(
+            self.room,
+            {
+                "type": "transfer_result",
+                "result": outcome,
+                "message": "Human agent was not available.",
+            },
+        )
+
+        if outcome == "declined":
+            return {
+                "status": "declined",
+                "message": (
+                    "The human agent is unavailable right now. Apologize, offer to take a message, "
+                    "or help with booking instead."
+                ),
+            }
+
         return {
-            "status": "transferring",
-            "message": "Understood. I will route your call to a human coordinator immediately. Please hold."
+            "status": "unavailable",
+            "message": (
+                "Could not reach a human agent at this time. Apologize and offer to help "
+                "or schedule a callback."
+            ),
         }
 
+
 async def entrypoint(ctx: JobContext):
-    logger.info(f"Entrypoint dispatched: connecting to room {ctx.room.name}")
-    
-    # Connect and subscribe only to participant audio
+    logger.info(f"Connecting to room {ctx.room.name}")
+
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
-    
-    # Setup speech components
+    await send_call_status(ctx.room, "connected")
+
     stt = deepgram.STT(model="nova-2", language="en")
-    
+
     cartesia_key = os.getenv("CARTESIA_API_KEY") or os.getenv("TTS_API_KEY")
-    tts = cartesia.TTS(api_key=cartesia_key, model="sonic-english", voice="f786b574-daa5-4673-aa0c-cbe3e8534c02")
-    
-    llm = groq.LLM(
-        api_key=os.getenv("GROQ_API_KEY"),
-        model="llama-3.3-70b-versatile"
+    tts = cartesia.TTS(
+        api_key=cartesia_key,
+        model="sonic-english",
+        voice="f786b574-daa5-4673-aa0c-cbe3e8534c02",
     )
-    
+
+    llm = groq.LLM(api_key=os.getenv("GROQ_API_KEY"), model="llama-3.3-70b-versatile")
     vad = silero.VAD.load()
 
-    # Instantiate the unified AgentSession
-    session = AgentSession(
-        stt=stt,
-        vad=vad,
-        llm=llm,
-        tts=tts,
-    )
+    session = AgentSession(stt=stt, vad=vad, llm=llm, tts=tts)
 
-    # Local transcript history cache
-    transcript_turns = []
+    transcript_turns: list[dict] = []
     has_finalized = False
+    takeover_event = asyncio.Event()
+    agent_paused = False
 
-    # 1. Handle live state broadcasts (Listening / Thinking / Speaking)
     @session.on("agent_state_changed")
     def on_agent_state_changed(event: AgentStateChangedEvent):
+        if agent_paused:
+            return
         state_str = str(event.new_state).lower()
-        # Map LiveKit states to front-end states
         if state_str in ["listening", "thinking", "speaking"]:
-            asyncio.create_task(send_custom_data(ctx.room, {
-                "type": "agent_state",
-                "state": state_str
-            }))
+            asyncio.create_task(send_custom_data(ctx.room, {"type": "agent_state", "state": state_str}))
 
-    # 2. Handle transcription broadcast & recording
     @session.on("conversation_item_added")
     def on_conversation_item_added(event: ConversationItemAddedEvent):
+        if agent_paused:
+            return
         item = event.item
-        if isinstance(item, ChatMessage):
-            # Only record spoken turns
-            if item.role in [ChatRole.USER, ChatRole.ASSISTANT]:
-                role_label = "caller" if item.role == ChatRole.USER else "agent"
-                text = item.text_content
-                if text:
-                    # Append to transcript history
-                    transcript_turns.append({
+        if isinstance(item, ChatMessage) and item.role in ("user", "assistant"):
+            role_label = "caller" if item.role == "user" else "agent"
+            text = item.text_content
+            if text:
+                transcript_turns.append(
+                    {
                         "speaker": role_label,
                         "text": text,
-                        "timestamp": datetime.utcnow().isoformat()
-                    })
-                    # Send live transcript update
-                    asyncio.create_task(send_custom_data(ctx.room, {
-                        "type": "transcript",
-                        "speaker": role_label,
-                        "text": text
-                    }))
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                )
+                asyncio.create_task(
+                    send_custom_data(
+                        ctx.room,
+                        {"type": "transcript", "speaker": role_label, "text": text},
+                    )
+                )
 
-    # Setup cleanup/summary function to run at call end
+    async def handle_takeover():
+        nonlocal agent_paused
+        if agent_paused:
+            return
+        agent_paused = True
+        takeover_event.set()
+        logger.info("Take-over requested — pausing AI agent")
+
+        try:
+            session.interrupt()
+        except Exception:
+            pass
+
+        await send_call_status(ctx.room, "takeover")
+        await send_custom_data(ctx.room, {"type": "agent_state", "state": "idle"})
+        await send_custom_data(ctx.room, {"type": "action", "action": ""})
+
+    @ctx.room.on("data_received")
+    def on_data_received(data: rtc.DataPacket):
+        try:
+            payload = json.loads(data.data.decode("utf-8"))
+            if payload.get("type") == "takeover_request":
+                asyncio.create_task(handle_takeover())
+        except Exception:
+            pass
+
     async def finalize_call():
         nonlocal has_finalized
         if has_finalized:
             return
         has_finalized = True
-        
+
+        await send_call_status(ctx.room, "ended")
+
         if not transcript_turns:
-            logger.info("Call ended: No transcript data recorded to summarize.")
+            logger.info("Call ended with no transcript.")
             return
 
-        logger.info("Call ended: Generating AI conversation summary via Groq...")
-        
-        # Format the full turn history
+        logger.info("Generating post-call summary...")
         transcript_text = "\n".join([f"{t['speaker']}: {t['text']}" for t in transcript_turns])
-        
+
         summary_text = ""
         try:
             import groq as groq_client_lib
+
             client = groq_client_lib.Groq(api_key=os.getenv("GROQ_API_KEY"))
             completion = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[
                     {
-                        "role": "system", 
-                        "content": "Summarize this call in 2-3 sentences: what the caller wanted, what was resolved, any follow-up needed."
+                        "role": "system",
+                        "content": (
+                            "Summarize this call in 2-3 sentences: what the caller wanted, "
+                            "what was resolved, and any follow-up needed."
+                        ),
                     },
-                    {"role": "user", "content": transcript_text}
-                ]
+                    {"role": "user", "content": transcript_text},
+                ],
             )
-            summary_text = completion.choices[0].message.content
-            logger.info(f"Summary generated successfully: {summary_text}")
+            summary_text = completion.choices[0].message.content or ""
         except Exception as e:
             logger.error(f"Failed to generate call summary: {e}")
             summary_text = "Call completed. Summary generation failed."
 
-        # Save call summary to PostgreSQL synchronously via thread pooling
-        db_res = await asyncio.to_thread(db_save_call_summary, ctx.room.name, summary_text, transcript_turns)
-        logger.info(f"Database summary write result: {db_res}")
+        await asyncio.to_thread(db_save_call_summary, ctx.room.name, summary_text, transcript_turns)
+        await send_custom_data(ctx.room, {"type": "summary", "text": summary_text})
 
-        # Send final data package to the room data channel (watcher is notified)
-        await send_custom_data(ctx.room, {
-            "type": "summary",
-            "text": summary_text
-        })
-
-    # Hook finalize callback on participant leaving or room disconnection
     @ctx.room.on("participant_disconnected")
     def on_participant_disconnected(participant):
-        logger.info(f"Caller participant left: {participant.identity}. Initiating finalization.")
-        asyncio.create_task(finalize_call())
+        if participant.identity != "agent" and not participant.identity.startswith("watcher"):
+            logger.info(f"Caller left: {participant.identity}")
+            asyncio.create_task(finalize_call())
 
-    @ctx.room.on("disconnected")
-    def on_disconnected():
-        logger.info("Room connection disconnected. Triggering finalization.")
-        asyncio.create_task(finalize_call())
+    agent = ClinicBookingAssistant(ctx.room, transcript_turns, takeover_event)
 
-    # Initialize clinical booking assistant
-    agent = ClinicBookingAssistant(ctx.room)
-
-    # Start the agent session loop
     logger.info("Starting AgentSession pipeline...")
     await session.start(agent=agent, room=ctx.room)
-    logger.info("AgentSession started successfully.")
-    
-    # Greet participant
-    await asyncio.sleep(1.5)
-    await session.say("Hello! Thank you for calling the clinic today. My name is Antigravity. How can I help you?", allow_interruptions=True)
 
-    # Keep entrypoint alive while connected
+    await asyncio.sleep(1.5)
+    if not agent_paused:
+        await session.say(
+            f"Hello! Thank you for calling {CLINIC_NAME}. My name is {AGENT_NAME}, your virtual receptionist. "
+            "How can I help you today?",
+            allow_interruptions=True,
+        )
+
     disconnect_future = asyncio.Future()
+
     @ctx.room.on("disconnected")
     def trigger_exit():
         if not disconnect_future.done():
             disconnect_future.set_result(True)
 
     await disconnect_future
-    # Fallback finalize call in case events were missed
     await finalize_call()
-    logger.info("Entrypoint run complete. Exiting worker task.")
+    logger.info("Worker task complete.")
+
 
 if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
