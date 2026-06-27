@@ -1,399 +1,558 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
-import { Loader2, RefreshCw, Radio, Users, Calendar, ArrowLeft, Eye, EyeOff, ShieldAlert, Sparkles, Brain, CheckCircle, HelpCircle, PhoneCall } from "lucide-react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
+import {
+  Mic,
+  MicOff,
+  PhoneOff,
+  Eye,
+  Loader2,
+  Radio,
+  Users,
+  ArrowLeft,
+  Headphones,
+  Brain,
+  AudioLines,
+  Ear,
+  Target,
+  Zap,
+  ShieldCheck,
+  X,
+  RefreshCw,
+  Sparkles,
+  UserRoundPlus,
+} from "lucide-react";
 import Link from "next/link";
-import { getApiUrl } from "@/lib/livekit-client";
-import { LiveKitRoom, RoomAudioRenderer, useRoomContext } from "@livekit/components-react";
+import {
+  LiveKitRoom,
+  RoomAudioRenderer,
+  useRoomContext,
+  useLocalParticipant,
+} from "@livekit/components-react";
 import { RoomEvent } from "livekit-client";
+import {
+  useMonitor,
+  type AgentState,
+  type CallStatus,
+  type TranscriptEntry,
+  type RoomInfo,
+} from "@/lib/useMonitor";
 
-interface RoomInfo {
-  name: string;
-  sid: string;
-  numParticipants: number;
-  maxParticipants: number;
-  creationTime: number;
+// ── Status badge color map ─────────────────────────────────────────
+function statusConfig(status: CallStatus) {
+  switch (status) {
+    case "connected":
+      return { label: "Connected", bg: "bg-emerald-500/15", text: "text-emerald-400", dot: "bg-emerald-400" };
+    case "connecting":
+      return { label: "Connecting", bg: "bg-blue-500/15", text: "text-blue-400", dot: "bg-blue-400" };
+    case "transferring":
+      return { label: "Transferring", bg: "bg-amber-500/15", text: "text-amber-400", dot: "bg-amber-400" };
+    case "ended":
+      return { label: "Call Ended", bg: "bg-slate-500/15", text: "text-slate-400", dot: "bg-slate-500" };
+    case "takeover":
+      return { label: "You Are Live", bg: "bg-rose-500/15", text: "text-rose-400", dot: "bg-rose-400" };
+    default:
+      return { label: "Disconnected", bg: "bg-slate-500/15", text: "text-slate-500", dot: "bg-slate-600" };
+  }
 }
 
+// ── Agent state indicator config ───────────────────────────────────
+function agentStateConfig(state: AgentState) {
+  switch (state) {
+    case "listening":
+      return { label: "Listening", color: "bg-indigo-500", glow: "shadow-indigo-500/40", icon: Ear };
+    case "thinking":
+      return { label: "Thinking", color: "bg-amber-500", glow: "shadow-amber-500/40", icon: Brain };
+    case "speaking":
+      return { label: "Speaking", color: "bg-emerald-500", glow: "shadow-emerald-500/40", icon: AudioLines };
+    default:
+      return { label: "Idle", color: "bg-slate-600", glow: "shadow-slate-500/20", icon: Radio };
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// MAIN PAGE COMPONENT
+// ════════════════════════════════════════════════════════════════════
 export default function MonitorPage() {
-  const [rooms, setRooms] = useState<RoomInfo[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [watchToken, setWatchToken] = useState<string | null>(null);
-  const [watchUrl, setWatchUrl] = useState<string | null>(null);
-  const [watchRoomName, setWatchRoomName] = useState<string | null>(null);
-  const [errorMessage, setErrorMessage] = useState("");
+  const [state, actions] = useMonitor();
 
-  const fetchRooms = async (isSilent = false) => {
-    if (!isSilent) setLoading(true);
-    else setRefreshing(true);
-    setErrorMessage("");
-
-    try {
-      const res = await fetch(getApiUrl("/api/rooms"));
-      if (!res.ok) {
-        throw new Error("Failed to fetch rooms from backend");
-      }
-      const data = await res.json();
-      setRooms(data.rooms || []);
-    } catch (err: any) {
-      console.error(err);
-      setErrorMessage(err.message || "Could not retrieve active rooms.");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchRooms();
-    const interval = setInterval(() => fetchRooms(true), 8000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const watchRoom = async (roomName: string) => {
-    try {
-      setErrorMessage("");
-      const res = await fetch(getApiUrl("/api/token"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          roomName,
-          participantName: `watcher-${Math.floor(Math.random() * 1000)}`,
-          isWatcher: true,
-        }),
-      });
-
-      if (!res.ok) {
-        throw new Error("Failed to mint watcher token");
-      }
-
-      const data = await res.json();
-      setWatchToken(data.token);
-      setWatchUrl(data.url);
-      setWatchRoomName(roomName);
-    } catch (err: any) {
-      console.error(err);
-      setErrorMessage(err.message || "Could not watch room.");
-    }
-  };
-
-  const stopWatching = () => {
-    setWatchToken(null);
-    setWatchUrl(null);
-    setWatchRoomName(null);
-  };
-
+  // If we have a token + url, render the LiveKitRoom wrapper; otherwise show the rooms list.
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
-      {/* Header */}
-      <header className="border-b border-slate-900 bg-slate-950/80 backdrop-blur-md sticky top-0 z-50">
-        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
+      {/* ── Header ──────────────────────────────────────────────── */}
+      <header className="border-b border-slate-800/60 bg-slate-950/90 backdrop-blur-xl sticky top-0 z-50">
+        <div className="w-full max-w-[1600px] mx-auto px-6 h-14 flex items-center justify-between">
+          {/* Left */}
           <div className="flex items-center gap-3">
-            <Link href="/" className="p-2 hover:bg-slate-900 rounded-lg text-slate-400 hover:text-white transition-colors">
-              <ArrowLeft className="h-5 w-5" />
+            <Link
+              href="/"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/60 transition-colors"
+            >
+              <ArrowLeft className="h-4 w-4" />
             </Link>
-            <div>
-              <h1 className="font-semibold text-lg text-white">Live Monitoring</h1>
-              <p className="text-[10px] text-slate-400">Real-time Call Dashboard</p>
-            </div>
+            <div className="h-5 w-px bg-slate-800" />
+            <Headphones className="h-4 w-4 text-indigo-400" />
+            <span className="text-sm font-semibold text-white tracking-tight">
+              {state.roomName ? state.roomName : "Live Monitor"}
+            </span>
+            {state.roomName && (
+              <>
+                <div className="h-5 w-px bg-slate-800 hidden sm:block" />
+                <StatusBadge status={state.callStatus} />
+              </>
+            )}
           </div>
-          <button
-            onClick={() => fetchRooms()}
-            disabled={loading || refreshing}
-            className="p-2 bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800 rounded-xl transition-all duration-200 disabled:opacity-50 flex items-center gap-2 text-xs"
-          >
-            <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
-            Refresh
-          </button>
+
+          {/* Right */}
+          <div className="flex items-center gap-3">
+            {!state.token && (
+              <button
+                onClick={() => actions.fetchRooms()}
+                className="flex items-center gap-1.5 text-[11px] text-slate-400 hover:text-white px-3 py-1.5 rounded-lg border border-slate-800 hover:border-slate-700 hover:bg-slate-900 transition-all"
+              >
+                <RefreshCw className="h-3 w-3" />
+                Refresh
+              </button>
+            )}
+            {state.token && !state.isTakenOver && state.callStatus !== "ended" && (
+              <TakeoverButton onTakeover={actions.requestTakeover} />
+            )}
+            {state.token && (
+              <button
+                onClick={actions.stopWatching}
+                className="flex items-center gap-1.5 text-[11px] text-red-400 hover:text-red-300 px-3 py-1.5 rounded-lg border border-red-500/20 hover:border-red-500/40 hover:bg-red-500/5 transition-all"
+              >
+                <X className="h-3 w-3" />
+                Leave
+              </button>
+            )}
+          </div>
         </div>
       </header>
 
-      {/* Main Grid */}
-      <div className="flex-1 max-w-6xl w-full mx-auto px-6 py-10 grid grid-cols-1 lg:grid-cols-3 gap-8">
-        
-        {/* Active Calls List (2 Columns on large screen) */}
-        <div className="lg:col-span-2 flex flex-col gap-6">
-          <div className="flex items-center justify-between border-b border-slate-900 pb-3">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">
-              <Radio className="h-4 w-4 text-indigo-400 animate-pulse" />
-              Active Channels ({rooms.length})
-            </h2>
-          </div>
-
-          {errorMessage && (
-            <div className="p-4 bg-red-950/20 border border-red-900/60 rounded-2xl text-red-400 text-xs flex items-center gap-2">
-              <ShieldAlert className="h-4 w-4 shrink-0" />
-              {errorMessage}
-            </div>
-          )}
-
-          {loading ? (
-            <div className="flex-1 flex flex-col items-center justify-center py-20 bg-slate-900/20 rounded-2xl border border-slate-900 border-dashed">
-              <Loader2 className="h-8 w-8 text-indigo-500 animate-spin mb-4" />
-              <p className="text-xs text-slate-500">Querying active channels...</p>
-            </div>
-          ) : rooms.length === 0 ? (
-            <div className="flex-1 flex flex-col items-center justify-center py-20 bg-slate-900/20 rounded-2xl border border-slate-900 border-dashed text-center px-4">
-              <Users className="h-10 w-10 text-slate-600 mb-4" />
-              <h3 className="font-semibold text-slate-300 mb-1">No Active Calls</h3>
-              <p className="text-xs text-slate-500 max-w-xs">
-                There are no callers connected at the moment. Use the landing page to start a new voice session.
-              </p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {rooms.map((room) => {
-                const isCurrentWatcherRoom = watchRoomName === room.name;
-                return (
-                  <div
-                    key={room.name}
-                    className="p-5 bg-slate-900/60 border border-slate-900 rounded-2xl hover:border-slate-800 hover:bg-slate-900 transition-all duration-300 flex flex-col justify-between"
-                  >
-                    <div>
-                      <div className="flex items-center justify-between mb-3">
-                        <span className="px-2.5 py-0.5 bg-indigo-500/10 text-indigo-400 text-[10px] font-mono rounded-md">
-                          {room.name}
-                        </span>
-                        <span className="flex items-center gap-1 text-[10px] text-slate-400">
-                          <Users className="h-3 w-3" />
-                          {room.numParticipants} / {room.maxParticipants}
-                        </span>
-                      </div>
-                      <p className="text-[10px] text-slate-500 font-mono mb-6">
-                        SID: {room.sid}
-                      </p>
-                    </div>
-
-                    <div className="flex items-center justify-between gap-4 border-t border-slate-800/40 pt-4">
-                      <span className="text-[10px] text-slate-500 flex items-center gap-1">
-                        <Calendar className="h-3.5 w-3.5" />
-                        {new Date(room.creationTime * 1000).toLocaleTimeString()}
-                      </span>
-                      
-                      {isCurrentWatcherRoom ? (
-                        <button
-                          onClick={stopWatching}
-                          className="px-3 py-1.5 bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 text-[10px] font-semibold rounded-lg transition-colors flex items-center gap-1.5"
-                        >
-                          <EyeOff className="h-3.5 w-3.5" />
-                          Stop
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => watchRoom(room.name)}
-                          className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700/60 text-[10px] font-semibold rounded-lg transition-colors flex items-center gap-1.5"
-                        >
-                          <Eye className="h-3.5 w-3.5" />
-                          Watch Live
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        {/* Watcher Stream Panel (1 Column on large screen) */}
-        <div className="lg:col-span-1 flex flex-col gap-6">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-400 border-b border-slate-900 pb-3">
-            Live Stream Feed
-          </h2>
-
-          {watchToken && watchUrl && watchRoomName ? (
-            <LiveKitRoom
-              video={false}
-              audio={true}
-              token={watchToken}
-              serverUrl={watchUrl}
-              onDisconnected={stopWatching}
-              connectOptions={{ autoSubscribe: true }}
-            >
-              <LiveFeedMonitor roomName={watchRoomName} onDisconnect={stopWatching} />
-              <RoomAudioRenderer />
-            </LiveKitRoom>
-          ) : (
-            <div className="p-8 bg-slate-900/20 border border-slate-900 border-dashed rounded-2xl text-center flex flex-col items-center justify-center py-16">
-              <EyeOff className="h-8 w-8 text-slate-700 mb-3" />
-              <p className="text-xs text-slate-500">
-                Select "Watch Live" next to an active channel to listen to the call feed and view real-time logs.
-              </p>
-            </div>
-          )}
-        </div>
-
-      </div>
-    </main>
+      {/* ── Body ────────────────────────────────────────────────── */}
+      {state.token && state.url ? (
+        <LiveKitRoom
+          video={false}
+          audio={state.isTakenOver}
+          token={state.token}
+          serverUrl={state.url}
+          onDisconnected={actions.stopWatching}
+          connectOptions={{ autoSubscribe: true }}
+          className="flex-1 flex flex-col"
+        >
+          <ConnectedDashboard state={state} actions={actions} />
+          <RoomAudioRenderer />
+        </LiveKitRoom>
+      ) : (
+        <RoomsListView
+          rooms={state.rooms}
+          loading={state.roomsLoading}
+          error={state.roomsError}
+          onWatch={actions.watchRoom}
+        />
+      )}
+    </div>
   );
 }
 
-// Subcomponent that consumes the LiveKit room context to decode data channel messages
-function LiveFeedMonitor({ roomName, onDisconnect }: { roomName: string; onDisconnect: () => void }) {
-  const room = useRoomContext();
-  const [agentState, setAgentState] = useState<string>("idle");
-  const [transcript, setTranscript] = useState<{ speaker: string; text: string; timestamp: string }[]>([]);
-  const [intent, setIntent] = useState<string>("general");
-  const [action, setAction] = useState<string>("idle");
-  const [summary, setSummary] = useState<string>("");
-
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    // Scroll chat window to bottom on new message
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [transcript]);
-
-  useEffect(() => {
-    const handleDataReceived = (payload: Uint8Array) => {
-      const decoder = new TextDecoder();
-      try {
-        const text = decoder.decode(payload);
-        const data = JSON.parse(text);
-        
-        logger.info("Watcher received data packet:", data);
-        
-        if (data.type === "agent_state") {
-          setAgentState(data.state);
-        } else if (data.type === "transcript") {
-          setTranscript((prev) => {
-            // Avoid exact duplicate checks (final updates vs chunk updates)
-            if (prev.length > 0) {
-              const last = prev[prev.length - 1];
-              if (last.speaker === data.speaker && last.text === data.text) {
-                return prev;
-              }
-            }
-            return [...prev, {
-              speaker: data.speaker,
-              text: data.text,
-              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-            }];
-          });
-        } else if (data.type === "intent") {
-          setIntent(data.intent);
-        } else if (data.type === "action") {
-          setAction(data.action);
-        } else if (data.type === "summary") {
-          setSummary(data.text);
-        }
-      } catch (err) {
-        console.error("Failed to parse data package from room:", err);
-      }
-    };
-
-    room.on(RoomEvent.DataReceived, handleDataReceived);
-    return () => {
-      room.off(RoomEvent.DataReceived, handleDataReceived);
-    };
-  }, [room]);
-
-  // CSS mappings for agent state glows
-  const stateColor = 
-    agentState === "speaking" ? "bg-emerald-500 shadow-emerald-500/30" : 
-    agentState === "thinking" ? "bg-amber-500 shadow-amber-500/30" : 
-    agentState === "listening" ? "bg-indigo-500 shadow-indigo-500/30" : 
-    "bg-slate-500 shadow-slate-500/30";
-
+// ════════════════════════════════════════════════════════════════════
+// ROOMS LIST VIEW (no room selected)
+// ════════════════════════════════════════════════════════════════════
+function RoomsListView({
+  rooms,
+  loading,
+  error,
+  onWatch,
+}: {
+  rooms: RoomInfo[];
+  loading: boolean;
+  error: string | null;
+  onWatch: (name: string) => void;
+}) {
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-2xl flex flex-col shadow-xl overflow-hidden max-h-[700px]">
-      
-      {/* Watcher Status Panel */}
-      <div className="p-4 bg-slate-900 border-b border-slate-800/80 flex items-center justify-between">
-        <div>
-          <span className="text-[10px] uppercase font-bold text-indigo-400 tracking-wider">Watcher Mode Active</span>
-          <h4 className="text-sm font-semibold text-white font-mono">{roomName}</h4>
-        </div>
-        <button 
-          onClick={onDisconnect}
-          className="text-xs py-1 px-3 bg-red-950/20 border border-red-900/40 text-red-400 hover:bg-red-950/40 rounded-lg transition-all"
-        >
-          Disconnect
-        </button>
+    <div className="flex-1 w-full max-w-[1600px] mx-auto px-6 py-10">
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500 flex items-center gap-2">
+          <Radio className="h-3.5 w-3.5 text-indigo-400 animate-pulse" />
+          Active Channels
+          <span className="ml-1 px-1.5 py-0.5 bg-slate-800 rounded text-[10px] text-slate-400 font-mono">
+            {rooms.length}
+          </span>
+        </h2>
+        <p className="text-[10px] text-slate-600">Polling every 3 s</p>
       </div>
 
-      {/* Real-time State Monitors */}
-      <div className="p-4 bg-slate-950/40 grid grid-cols-3 gap-2 border-b border-slate-800/60 text-center">
-        <div className="p-2 bg-slate-900/60 border border-slate-800/50 rounded-xl flex flex-col items-center">
-          <span className="text-[9px] text-slate-500 uppercase font-semibold">Agent State</span>
-          <span className="flex items-center gap-1.5 mt-1">
-            <span className={`w-2 h-2 rounded-full ${stateColor} animate-pulse shadow-md`} />
-            <span className="text-xs font-semibold text-slate-200 capitalize">{agentState}</span>
-          </span>
+      {error && (
+        <div className="mb-6 p-3 rounded-xl bg-red-500/5 border border-red-500/10 text-red-400 text-xs">
+          {error}
         </div>
+      )}
 
-        <div className="p-2 bg-slate-900/60 border border-slate-800/50 rounded-xl flex flex-col items-center">
-          <span className="text-[9px] text-slate-500 uppercase font-semibold">Intent</span>
-          <span className="flex items-center gap-1.5 mt-1 text-xs font-semibold text-slate-200 capitalize">
-            {intent === "booking" ? <CheckCircle className="h-3.5 w-3.5 text-indigo-400" /> :
-             intent === "transfer_request" ? <PhoneCall className="h-3.5 w-3.5 text-red-400 animate-bounce" /> :
-             <HelpCircle className="h-3.5 w-3.5 text-slate-400" />}
-            {intent.replace("_", " ")}
-          </span>
+      {loading ? (
+        <div className="py-32 flex flex-col items-center justify-center text-center">
+          <Loader2 className="h-7 w-7 text-indigo-500 animate-spin mb-3" />
+          <p className="text-xs text-slate-500">Loading rooms…</p>
         </div>
-
-        <div className="p-2 bg-slate-900/60 border border-slate-800/50 rounded-xl flex flex-col items-center">
-          <span className="text-[9px] text-slate-500 uppercase font-semibold">Action</span>
-          <span className="text-[10px] font-semibold text-slate-300 mt-1 capitalize truncate max-w-[80px]">
-            {action.replace("_", " ")}
-          </span>
-        </div>
-      </div>
-
-      {/* Live Transcript Log */}
-      <div className="flex-1 p-4 overflow-y-auto max-h-[300px] min-h-[220px] bg-slate-950/20 flex flex-col gap-3" ref={scrollRef}>
-        {transcript.length === 0 ? (
-          <div className="flex-1 flex flex-col items-center justify-center py-10 text-center">
-            <Loader2 className="h-5 w-5 text-indigo-500 animate-spin mb-2" />
-            <p className="text-[10px] text-slate-500">Waiting for first utterance...</p>
-          </div>
-        ) : (
-          transcript.map((msg, index) => {
-            const isAgent = msg.speaker === "agent";
-            return (
-              <div 
-                key={index} 
-                className={`flex flex-col max-w-[85%] ${isAgent ? "self-start items-start" : "self-end items-end"}`}
-              >
-                <span className="text-[8px] text-slate-500 mb-0.5 px-1">
-                  {isAgent ? "Agent" : "Caller"} &bull; {msg.timestamp}
-                </span>
-                <div 
-                  className={`p-3 rounded-2xl text-xs leading-relaxed ${
-                    isAgent 
-                      ? "bg-slate-800 text-slate-100 rounded-tl-none border border-slate-700/30" 
-                      : "bg-indigo-600 text-white rounded-tr-none"
-                  }`}
-                >
-                  {msg.text}
-                </div>
-              </div>
-            );
-          })
-        )}
-      </div>
-
-      {/* Final Summary Card (if generated) */}
-      {summary && (
-        <div className="p-4 bg-gradient-to-tr from-amber-500/10 to-indigo-500/10 border-t border-slate-800">
-          <div className="flex items-center gap-1.5 mb-1.5">
-            <Sparkles className="h-4 w-4 text-amber-400" />
-            <h5 className="text-[10px] uppercase font-bold text-amber-400 tracking-wider">AI Call Summary</h5>
-          </div>
-          <p className="text-xs text-slate-300 leading-relaxed italic bg-slate-950/60 p-3 rounded-xl border border-slate-800">
-            {summary}
+      ) : rooms.length === 0 ? (
+        <div className="py-32 flex flex-col items-center justify-center text-center">
+          <Users className="h-10 w-10 text-slate-700 mb-3" />
+          <h3 className="text-sm font-semibold text-slate-300 mb-1">No Active Calls</h3>
+          <p className="text-xs text-slate-500 max-w-xs">
+            Start a call from the landing page and it will appear here automatically.
           </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          {rooms.map((room) => (
+            <div
+              key={room.name}
+              className="group p-5 rounded-2xl bg-slate-900/50 border border-slate-800/60 hover:border-indigo-500/20 hover:bg-slate-900/80 transition-all duration-300"
+            >
+              <div className="flex items-center justify-between mb-4">
+                <span className="px-2 py-0.5 text-[10px] font-mono text-indigo-400 bg-indigo-500/10 rounded-md">
+                  {room.name}
+                </span>
+                <span className="text-[10px] text-slate-500 flex items-center gap-1">
+                  <Users className="h-3 w-3" />
+                  {room.numParticipants}
+                </span>
+              </div>
+              <p className="text-[9px] text-slate-600 font-mono mb-5 truncate">SID: {room.sid}</p>
+              <button
+                onClick={() => onWatch(room.name)}
+                className="w-full py-2 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 bg-slate-800 hover:bg-indigo-600 text-slate-300 hover:text-white border border-slate-700/50 hover:border-indigo-500 transition-all duration-200 active:scale-[0.97]"
+              >
+                <Eye className="h-3.5 w-3.5" />
+                Watch Live
+              </button>
+            </div>
+          ))}
         </div>
       )}
     </div>
   );
 }
 
-// Client logging helper
-const logger = {
-  info: (...args: any[]) => console.log("[LiveFeedMonitor] INFO:", ...args),
-  error: (...args: any[]) => console.error("[LiveFeedMonitor] ERROR:", ...args)
-};
+// ════════════════════════════════════════════════════════════════════
+// CONNECTED DASHBOARD (room is active)
+// ════════════════════════════════════════════════════════════════════
+function ConnectedDashboard({
+  state,
+  actions,
+}: {
+  state: ReturnType<typeof useMonitor>[0];
+  actions: ReturnType<typeof useMonitor>[1];
+}) {
+  const room = useRoomContext();
+  const { localParticipant, isMicrophoneEnabled } = useLocalParticipant();
+
+  // Subscribe to DataReceived events and forward to our state hook
+  useEffect(() => {
+    const handler = (payload: Uint8Array) => {
+      actions.handleDataMessage(payload);
+    };
+    room.on(RoomEvent.DataReceived, handler);
+    return () => {
+      room.off(RoomEvent.DataReceived, handler);
+    };
+  }, [room, actions]);
+
+  // Takeover: publish data message and enable mic
+  const executeTakeover = useCallback(async () => {
+    actions.requestTakeover();
+    try {
+      // Notify the agent worker to pause (requires worker.py support — see comments in worker.py)
+      await room.localParticipant.publishData(
+        JSON.stringify({ type: "takeover_request" }),
+        { reliable: true }
+      );
+    } catch (e) {
+      console.error("Failed to publish takeover request:", e);
+    }
+    // Enable our own mic so we can talk to the caller
+    try {
+      await localParticipant.setMicrophoneEnabled(true);
+    } catch (e) {
+      console.error("Failed to enable mic:", e);
+    }
+  }, [room, localParticipant, actions]);
+
+  const toggleMic = useCallback(async () => {
+    if (localParticipant) {
+      await localParticipant.setMicrophoneEnabled(!isMicrophoneEnabled);
+    }
+  }, [localParticipant, isMicrophoneEnabled]);
+
+  const endTakeover = useCallback(() => {
+    if (localParticipant) localParticipant.setMicrophoneEnabled(false);
+    actions.stopWatching();
+  }, [localParticipant, actions]);
+
+  return (
+    <div className="flex-1 flex flex-col lg:flex-row w-full max-w-[1600px] mx-auto relative">
+      {/* ── Main: Transcript Panel ─────────────────────────── */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Takeover banner */}
+        {state.isTakenOver && (
+          <div className="px-6 py-3 bg-rose-500/10 border-b border-rose-500/20 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-2.5 w-2.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-60" />
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-500" />
+              </span>
+              <span className="text-xs font-semibold text-rose-300">You are now live with the caller</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={toggleMic}
+                className={`p-2 rounded-lg border text-xs transition-all ${
+                  isMicrophoneEnabled
+                    ? "bg-slate-800 border-slate-700 text-white"
+                    : "bg-red-500/10 border-red-500/30 text-red-400"
+                }`}
+              >
+                {isMicrophoneEnabled ? <Mic className="h-4 w-4" /> : <MicOff className="h-4 w-4" />}
+              </button>
+              <button
+                onClick={endTakeover}
+                className="px-3 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all active:scale-95"
+              >
+                <PhoneOff className="h-3.5 w-3.5" />
+                End
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Transcript area */}
+        <TranscriptPanel transcript={state.transcript} />
+      </div>
+
+      {/* ── Sidebar ─────────────────────────────────────────── */}
+      <aside className="w-full lg:w-80 xl:w-96 border-t lg:border-t-0 lg:border-l border-slate-800/60 flex flex-col shrink-0">
+        {/* Agent state */}
+        <div className="p-5 border-b border-slate-800/60">
+          <SectionLabel text="Agent State" />
+          <AgentStatePill state={state.agentState} />
+        </div>
+
+        {/* Intent */}
+        <div className="p-5 border-b border-slate-800/60">
+          <SectionLabel text="Detected Intent" />
+          <IntentBadge intent={state.intent} />
+        </div>
+
+        {/* Action */}
+        <div className="p-5 border-b border-slate-800/60">
+          <SectionLabel text="Current Action" />
+          <ActionLine action={state.action} />
+        </div>
+
+        {/* Participants count */}
+        <div className="p-5 border-b border-slate-800/60">
+          <SectionLabel text="Room Info" />
+          <div className="mt-2 flex items-center gap-2 text-xs text-slate-400">
+            <Users className="h-3.5 w-3.5" />
+            <span>{state.roomName || "—"}</span>
+          </div>
+        </div>
+
+        {/* Takeover CTA (only if not already taken over and call is live) */}
+        {!state.isTakenOver && state.callStatus !== "ended" && state.callStatus !== "disconnected" && (
+          <div className="p-5 mt-auto">
+            <button
+              onClick={executeTakeover}
+              className="w-full py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 text-white shadow-lg shadow-rose-600/10 hover:shadow-rose-600/20 active:scale-[0.97] transition-all duration-200"
+            >
+              <UserRoundPlus className="h-4 w-4" />
+              Take Over Call
+            </button>
+            <p className="text-[9px] text-slate-600 text-center mt-2">
+              This will pause the AI agent and connect your microphone to the caller.
+            </p>
+          </div>
+        )}
+      </aside>
+
+      {/* ── Summary Modal ───────────────────────────────────── */}
+      {state.summary && <SummaryModal summary={state.summary} onClose={() => actions.setCallStatus("ended")} />}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════
+// SUB-COMPONENTS
+// ════════════════════════════════════════════════════════════════════
+
+function SectionLabel({ text }: { text: string }) {
+  return (
+    <p className="text-[9px] font-bold uppercase tracking-[0.15em] text-slate-600 mb-2">{text}</p>
+  );
+}
+
+// ── Status badge ───────────────────────────────────────────────────
+function StatusBadge({ status }: { status: CallStatus }) {
+  const cfg = statusConfig(status);
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold ${cfg.bg} ${cfg.text}`}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${cfg.dot} ${status === "connected" || status === "takeover" ? "animate-pulse" : ""}`} />
+      {cfg.label}
+    </span>
+  );
+}
+
+// ── Agent state animated pill ──────────────────────────────────────
+function AgentStatePill({ state }: { state: AgentState }) {
+  const cfg = agentStateConfig(state);
+  const Icon = cfg.icon;
+  return (
+    <div className="flex items-center gap-3 mt-1">
+      <div className={`h-9 w-9 rounded-xl ${cfg.color} ${cfg.glow} shadow-lg flex items-center justify-center ${state !== "idle" ? "animate-pulse" : ""}`}>
+        <Icon className="h-4 w-4 text-white" />
+      </div>
+      <span className="text-sm font-semibold text-slate-200">{cfg.label}</span>
+    </div>
+  );
+}
+
+// ── Intent badge ───────────────────────────────────────────────────
+function IntentBadge({ intent }: { intent: string }) {
+  const isBooking = intent === "booking";
+  const isTransfer = intent === "transfer_request";
+
+  return (
+    <div className="mt-1">
+      <span
+        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border ${
+          isBooking
+            ? "bg-indigo-500/10 border-indigo-500/20 text-indigo-400"
+            : isTransfer
+              ? "bg-amber-500/10 border-amber-500/20 text-amber-400"
+              : "bg-slate-800 border-slate-700/60 text-slate-400"
+        }`}
+      >
+        {isBooking ? <Target className="h-3 w-3" /> : isTransfer ? <Zap className="h-3 w-3" /> : <ShieldCheck className="h-3 w-3" />}
+        {intent.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
+      </span>
+    </div>
+  );
+}
+
+// ── Action line with spinner ───────────────────────────────────────
+function ActionLine({ action }: { action: string }) {
+  if (!action) {
+    return <p className="mt-1 text-xs text-slate-600 italic">No active action</p>;
+  }
+
+  const label = action
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+
+  return (
+    <div className="mt-1 flex items-center gap-2">
+      <Loader2 className="h-3.5 w-3.5 text-indigo-400 animate-spin shrink-0" />
+      <span className="text-xs text-slate-300 font-medium">{label}…</span>
+    </div>
+  );
+}
+
+// ── Take over button (header version) ──────────────────────────────
+function TakeoverButton({ onTakeover }: { onTakeover: () => void }) {
+  return (
+    <button
+      onClick={onTakeover}
+      className="hidden sm:flex items-center gap-1.5 text-[11px] font-semibold text-rose-400 hover:text-rose-300 px-3 py-1.5 rounded-lg border border-rose-500/20 hover:border-rose-500/40 hover:bg-rose-500/5 transition-all"
+    >
+      <UserRoundPlus className="h-3 w-3" />
+      Take Over
+    </button>
+  );
+}
+
+// ── Transcript panel ───────────────────────────────────────────────
+function TranscriptPanel({ transcript }: { transcript: TranscriptEntry[] }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    }
+  }, [transcript]);
+
+  return (
+    <div
+      ref={scrollRef}
+      className="flex-1 overflow-y-auto px-6 py-6 flex flex-col gap-3 min-h-0"
+      style={{ maxHeight: "calc(100vh - 3.5rem)" }}
+    >
+      {transcript.length === 0 ? (
+        <div className="flex-1 flex flex-col items-center justify-center text-center py-20">
+          <div className="h-14 w-14 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center mb-4">
+            <AudioLines className="h-6 w-6 text-slate-700" />
+          </div>
+          <p className="text-xs text-slate-600">Waiting for conversation to begin…</p>
+        </div>
+      ) : (
+        transcript.map((entry, i) => {
+          const isAgent = entry.speaker === "agent";
+          return (
+            <div
+              key={i}
+              className={`flex flex-col max-w-[75%] ${isAgent ? "self-end items-end" : "self-start items-start"}`}
+            >
+              <span className="text-[9px] text-slate-600 mb-0.5 px-1 font-mono">
+                {isAgent ? "Agent" : "Caller"} · {entry.timestamp}
+              </span>
+              <div
+                className={`px-4 py-2.5 rounded-2xl text-[13px] leading-relaxed ${
+                  isAgent
+                    ? "bg-indigo-600 text-white rounded-br-sm"
+                    : "bg-slate-800 text-slate-100 border border-slate-700/40 rounded-bl-sm"
+                }`}
+              >
+                {entry.text}
+              </div>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+// ── Summary modal ──────────────────────────────────────────────────
+function SummaryModal({ summary, onClose }: { summary: string; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center">
+      {/* Overlay */}
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+
+      {/* Card */}
+      <div className="relative z-10 w-full max-w-lg mx-4 bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden">
+        {/* Decorative gradient strip */}
+        <div className="h-1 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500" />
+
+        <div className="p-8">
+          <div className="flex items-center gap-2 mb-4">
+            <Sparkles className="h-5 w-5 text-amber-400" />
+            <h3 className="text-lg font-bold text-white">Call Summary</h3>
+          </div>
+
+          <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 mb-6">
+            <p className="text-sm text-slate-300 leading-relaxed">{summary}</p>
+          </div>
+
+          <button
+            onClick={onClose}
+            className="w-full py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-sm font-semibold transition-all active:scale-[0.97]"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
