@@ -20,6 +20,7 @@ from livekit.agents import (
 )
 from livekit.agents.llm import ChatMessage
 from livekit.plugins import cartesia, deepgram, groq, silero
+from livekit.agents.voice.agent_activity import TurnDetectionMode
 
 from app.services.transfer import build_transfer_summary
 
@@ -130,12 +131,13 @@ async def initiate_transfer_via_api(room_name: str, reason: str, summary: str) -
 
 
 class ClinicBookingAssistant(Agent):
-    def __init__(self, room, transcript_turns: list, takeover_event: asyncio.Event, on_takeover=None):
+    def __init__(self, room, transcript_turns: list, takeover_event: asyncio.Event, on_takeover=None, on_transfer_accept=None):
         super().__init__(instructions=SYSTEM_PROMPT)
         self.room = room
         self.transcript_turns = transcript_turns
         self.takeover_event = takeover_event
         self.on_takeover = on_takeover
+        self.on_transfer_accept = on_transfer_accept
         self.transfer_in_progress = False
 
     @function_tool
@@ -218,8 +220,8 @@ class ClinicBookingAssistant(Agent):
                 self.room,
                 {"type": "transfer_result", "result": "accepted", "message": "Human agent accepted the call."},
             )
-            if self.on_takeover:
-                asyncio.create_task(self.on_takeover())
+            if self.on_transfer_accept:
+                asyncio.create_task(self.on_transfer_accept())
             return {
                 "status": "accepted",
                 "message": (
@@ -321,16 +323,42 @@ async def entrypoint(ctx: JobContext):
             return
         agent_paused = True
         takeover_event.set()
-        logger.info("Take-over requested — pausing AI agent")
+        logger.info("Take-over requested — pausing AI agent VAD")
+
+        try:
+            session.update_options(turn_detection="manual")
+            session.interrupt()
+        except Exception as e:
+            logger.error(f"Failed to pause VAD: {e}")
+
+        await send_call_status(ctx.room, "takeover")
+        await send_custom_data(ctx.room, {"type": "agent_state", "state": "idle"})
+        await send_custom_data(ctx.room, {"type": "action", "action": ""})
+
+    async def handle_resume():
+        nonlocal agent_paused
+        if not agent_paused:
+            return
+        agent_paused = False
+        logger.info("Resume requested — resuming AI agent VAD")
+
+        try:
+            session.update_options(turn_detection="vad")
+        except Exception as e:
+            logger.error(f"Failed to resume VAD: {e}")
+
+        await send_call_status(ctx.room, "connected")
+
+    async def handle_transfer_accept():
+        nonlocal agent_paused
+        agent_paused = True
+        takeover_event.set()
+        logger.info("Transfer accepted — permanently closing AI agent session")
 
         try:
             await session.aclose()
         except Exception:
             pass
-
-        await send_call_status(ctx.room, "takeover")
-        await send_custom_data(ctx.room, {"type": "agent_state", "state": "idle"})
-        await send_custom_data(ctx.room, {"type": "action", "action": ""})
 
     @ctx.room.on("data_received")
     def on_data_received(data: rtc.DataPacket):
@@ -338,6 +366,8 @@ async def entrypoint(ctx: JobContext):
             payload = json.loads(data.data.decode("utf-8"))
             if payload.get("type") == "takeover_request":
                 asyncio.create_task(handle_takeover())
+            elif payload.get("type") == "resume_request":
+                asyncio.create_task(handle_resume())
         except Exception:
             pass
 
@@ -388,7 +418,13 @@ async def entrypoint(ctx: JobContext):
             logger.info(f"Caller left: {participant.identity}")
             asyncio.create_task(finalize_call())
 
-    agent = ClinicBookingAssistant(ctx.room, transcript_turns, takeover_event, on_takeover=handle_takeover)
+    agent = ClinicBookingAssistant(
+        ctx.room,
+        transcript_turns,
+        takeover_event,
+        on_takeover=handle_takeover,
+        on_transfer_accept=handle_transfer_accept
+    )
 
     logger.info("Starting AgentSession pipeline...")
     await session.start(agent=agent, room=ctx.room)

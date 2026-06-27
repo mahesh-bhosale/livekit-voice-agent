@@ -240,6 +240,7 @@ export function useMonitor(): [MonitorState, MonitorActions] {
         case "call_status":
           if (data.status) setCallStatus(data.status as CallStatus);
           if (data.status === "takeover") setIsTakenOver(true);
+          else if (data.status === "connected") setIsTakenOver(false);
           break;
 
         case "transfer_result":

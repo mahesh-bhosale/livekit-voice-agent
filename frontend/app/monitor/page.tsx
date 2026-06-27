@@ -23,6 +23,7 @@ import {
   UserRoundPlus,
   CalendarCheck,
   PhoneForwarded,
+  Play,
 } from "lucide-react";
 import Link from "next/link";
 import {
@@ -380,6 +381,20 @@ function ConnectedDashboard({
     actions.stopWatching();
   }, [localParticipant, actions]);
 
+  const resumeAI = useCallback(async () => {
+    try {
+      await room.localParticipant.publishData(
+        JSON.stringify({ type: "resume_request" }),
+        { reliable: true },
+      );
+    } catch (e) {
+      console.error("Failed to publish resume request:", e);
+    }
+    if (localParticipant) {
+      void localParticipant.setMicrophoneEnabled(false);
+    }
+  }, [room, localParticipant]);
+
   return (
     <div className="flex-1 flex flex-col lg:flex-row w-full max-w-[1600px] mx-auto relative">
       <div className="flex-1 flex flex-col min-w-0">
@@ -406,6 +421,13 @@ function ConnectedDashboard({
                 }`}
               >
                 {isMicrophoneEnabled ? <Mic className="h-4 w-4" /> : <MicOff className="h-4 w-4" />}
+              </button>
+              <button
+                onClick={resumeAI}
+                className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all active:scale-95"
+              >
+                <Play className="h-3.5 w-3.5" />
+                Resume AI
               </button>
               <button
                 onClick={endTakeover}
