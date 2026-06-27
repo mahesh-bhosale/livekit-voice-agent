@@ -130,11 +130,12 @@ async def initiate_transfer_via_api(room_name: str, reason: str, summary: str) -
 
 
 class ClinicBookingAssistant(Agent):
-    def __init__(self, room, transcript_turns: list, takeover_event: asyncio.Event):
+    def __init__(self, room, transcript_turns: list, takeover_event: asyncio.Event, on_takeover=None):
         super().__init__(instructions=SYSTEM_PROMPT)
         self.room = room
         self.transcript_turns = transcript_turns
         self.takeover_event = takeover_event
+        self.on_takeover = on_takeover
 
     @function_tool
     async def check_availability(self, date: str, time: str) -> dict:
@@ -209,6 +210,8 @@ class ClinicBookingAssistant(Agent):
                 self.room,
                 {"type": "transfer_result", "result": "accepted", "message": "Human agent accepted the call."},
             )
+            if self.on_takeover:
+                asyncio.create_task(self.on_takeover())
             return {
                 "status": "accepted",
                 "message": (
@@ -310,7 +313,7 @@ async def entrypoint(ctx: JobContext):
         logger.info("Take-over requested — pausing AI agent")
 
         try:
-            session.interrupt()
+            await session.aclose()
         except Exception:
             pass
 
@@ -374,7 +377,7 @@ async def entrypoint(ctx: JobContext):
             logger.info(f"Caller left: {participant.identity}")
             asyncio.create_task(finalize_call())
 
-    agent = ClinicBookingAssistant(ctx.room, transcript_turns, takeover_event)
+    agent = ClinicBookingAssistant(ctx.room, transcript_turns, takeover_event, on_takeover=handle_takeover)
 
     logger.info("Starting AgentSession pipeline...")
     await session.start(agent=agent, room=ctx.room)
