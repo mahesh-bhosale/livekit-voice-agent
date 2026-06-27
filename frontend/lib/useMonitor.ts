@@ -33,7 +33,6 @@ export interface CallSummaryEntry {
   created_at: string | null;
 }
 
-
 export type AgentState = "idle" | "initializing" | "listening" | "thinking" | "speaking";
 
 export type CallStatus =
@@ -55,12 +54,16 @@ export interface MonitorState {
   intent: string;
   action: string;
   summary: string | null;
-  transferResult: string | null;
+  // FIX: expose the full transfer result object so UI can distinguish no-answer / declined / unavailable
+  transferResult: "accepted" | "declined" | "no-answer" | "unavailable" | "in_progress" | null;
+  transferMessage: string | null;
   bookingData: BookingData | null;
   rooms: RoomInfo[];
   roomsLoading: boolean;
   roomsError: string | null;
+  // FIX: distinguish permanent takeover (transfer accepted) from temporary takeover
   isTakenOver: boolean;
+  isPermanentTakeover: boolean;
   pastSummaries: CallSummaryEntry[];
   pastSummariesLoading: boolean;
 }
@@ -72,7 +75,9 @@ export interface MonitorActions {
   handleDataMessage: (payload: Uint8Array) => void;
   beginTakeover: () => void;
   triggerTakeover: () => Promise<void>;
+  triggerResume: () => Promise<void>;
   registerTakeoverExecute: (handler: (() => Promise<void>) | null) => void;
+  registerResumeExecute: (handler: (() => Promise<void>) | null) => void;
   setCallStatus: (status: CallStatus) => void;
   fetchPastSummaries: () => Promise<void>;
 }
@@ -88,7 +93,8 @@ export function useMonitor(): [MonitorState, MonitorActions] {
   const [intent, setIntent] = useState<string>("general");
   const [action, setAction] = useState<string>("");
   const [summary, setSummary] = useState<string | null>(null);
-  const [transferResult, setTransferResult] = useState<string | null>(null);
+  const [transferResult, setTransferResult] = useState<MonitorState["transferResult"]>(null);
+  const [transferMessage, setTransferMessage] = useState<string | null>(null);
   const [bookingData, setBookingData] = useState<BookingData | null>(null);
 
   const [rooms, setRooms] = useState<RoomInfo[]>([]);
@@ -96,7 +102,24 @@ export function useMonitor(): [MonitorState, MonitorActions] {
   const [roomsError, setRoomsError] = useState<string | null>(null);
 
   const [isTakenOver, setIsTakenOver] = useState(false);
+  // FIX: track permanent takeover separately so Resume AI button is hidden after transfer accepted
+  const [isPermanentTakeover, setIsPermanentTakeover] = useState(false);
+  const isPermanentTakeoverRef = useRef(false);
+  // FIX: track resume-in-progress to prevent double-clicks and premature state changes
+  const [resumeInProgress, setResumeInProgress] = useState(false);
+  const resumeInProgressRef = useRef(false);
+
+  useEffect(() => {
+    isPermanentTakeoverRef.current = isPermanentTakeover;
+  }, [isPermanentTakeover]);
+
+  useEffect(() => {
+    resumeInProgressRef.current = resumeInProgress;
+  }, [resumeInProgress]);
+
   const takeoverExecuteRef = useRef<(() => Promise<void>) | null>(null);
+  // FIX: separate ref for resume so the Resume AI button has its own handler
+  const resumeExecuteRef = useRef<(() => Promise<void>) | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -115,7 +138,6 @@ export function useMonitor(): [MonitorState, MonitorActions] {
       setPastSummariesLoading(false);
     }
   }, []);
-
 
   const fetchRooms = useCallback(async () => {
     try {
@@ -148,8 +170,10 @@ export function useMonitor(): [MonitorState, MonitorActions] {
     setIntent("general");
     setAction("");
     setTransferResult(null);
+    setTransferMessage(null);
     setBookingData(null);
     setIsTakenOver(false);
+    setIsPermanentTakeover(false);
 
     try {
       const watcherId = `watcher-${Math.random().toString(36).slice(2, 8)}`;
@@ -191,85 +215,130 @@ export function useMonitor(): [MonitorState, MonitorActions] {
     setIntent("general");
     setAction("");
     setTransferResult(null);
+    setTransferMessage(null);
     setBookingData(null);
     setIsTakenOver(false);
+    setIsPermanentTakeover(false);
     takeoverExecuteRef.current = null;
+    resumeExecuteRef.current = null;
     fetchPastSummaries();
   }, [fetchPastSummaries]);
 
-  const handleDataMessage = useCallback((payload: Uint8Array) => {
-    try {
-      const text = new TextDecoder().decode(payload);
-      const data = JSON.parse(text);
+  const handleDataMessage = useCallback(
+    (payload: Uint8Array) => {
+      try {
+        const text = new TextDecoder().decode(payload);
+        const data = JSON.parse(text);
 
-      switch (data.type) {
-        case "agent_state":
-          setAgentState(data.state as AgentState);
-          break;
+        switch (data.type) {
+          case "agent_state":
+            setAgentState(data.state as AgentState);
+            break;
 
-        case "transcript":
-          setTranscript((prev) => {
-            if (prev.length > 0) {
-              const last = prev[prev.length - 1];
-              if (last.speaker === data.speaker && last.text === data.text) return prev;
+          case "transcript":
+            setTranscript((prev) => {
+              if (prev.length > 0) {
+                const last = prev[prev.length - 1];
+                if (last.speaker === data.speaker && last.text === data.text) return prev;
+              }
+              return [
+                ...prev,
+                {
+                  speaker: data.speaker,
+                  text: data.text,
+                  timestamp: new Date().toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    second: "2-digit",
+                  }),
+                },
+              ];
+            });
+            break;
+
+          case "intent":
+            setIntent(data.intent);
+            if (data.intent === "transfer_to_human" || data.intent === "transfer_request") {
+              setCallStatus("transferring");
             }
-            return [
-              ...prev,
-              {
-                speaker: data.speaker,
-                text: data.text,
-                timestamp: new Date().toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                  second: "2-digit",
-                }),
-              },
-            ];
-          });
-          break;
+            break;
 
-        case "intent":
-          setIntent(data.intent);
-          if (data.intent === "transfer_request") setCallStatus("transferring");
-          break;
+          case "action":
+            setAction(data.action || "");
+            break;
 
-        case "action":
-          setAction(data.action || "");
-          break;
+          case "call_status":
+            if (data.status) setCallStatus(data.status as CallStatus);
 
-        case "call_status":
-          if (data.status) setCallStatus(data.status as CallStatus);
-          if (data.status === "takeover") setIsTakenOver(true);
-          else if (data.status === "connected") setIsTakenOver(false);
-          break;
+            if (data.status === "takeover") {
+              setIsTakenOver(true);
+            } else if (data.status === "transfer_connected") {
+              // FIX: mark as permanent so Resume AI is hidden
+              setIsTakenOver(true);
+              setIsPermanentTakeover(true);
+            } else if (data.status === "connected") {
+              // Agent confirmed resume or normal connected state
+              if (resumeInProgressRef.current) {
+                // Resume confirmed by agent — now safe to clear takeover state
+                setIsTakenOver(false);
+                setResumeInProgress(false);
+              } else if (!isPermanentTakeoverRef.current) {
+                setIsTakenOver(false);
+              }
+            }
+            break;
 
-        case "transfer_result":
-          setTransferResult(data.result);
-          break;
+          case "transfer_result":
+            setTransferResult(data.result as MonitorState["transferResult"]);
+            setTransferMessage(data.message || null);
+            if (data.result === "accepted") {
+              setCallStatus("transfer_connected");
+              setIsPermanentTakeover(true);
+              setIsTakenOver(true);
+            } else if (
+              data.result === "no-answer" ||
+              data.result === "declined" ||
+              data.result === "unavailable"
+            ) {
+              setCallStatus("connected");
+              setIsTakenOver(false);
+              setIsPermanentTakeover(false);
+            }
+            break;
 
-        case "booking_data":
-          setBookingData({
-            name: data.name,
-            reason: data.reason,
-            date: data.date,
-            time: data.time,
-            phone: data.phone,
-          });
-          break;
+          case "supervisor_audio":
+            if (data.enabled) {
+              setIsTakenOver(true);
+              setIsPermanentTakeover(true);
+              setCallStatus("transfer_connected");
+            }
+            break;
 
-        case "summary":
-          setSummary(data.text);
-          setCallStatus("ended");
-          fetchPastSummaries();
-          break;
+          case "booking_data":
+            setBookingData({
+              name: data.name,
+              reason: data.reason,
+              date: data.date,
+              time: data.time,
+              phone: data.phone,
+            });
+            break;
 
-        default:
-          break;
+          case "summary":
+            setSummary(data.text);
+            setCallStatus("ended");
+            fetchPastSummaries();
+            break;
+
+          default:
+            break;
+        }
+      } catch {
+        // ignore malformed packets
       }
-    } catch {
-      // ignore malformed packets
-    }
-  }, [fetchPastSummaries]);
+    },
+    [fetchPastSummaries]
+  );
 
   const beginTakeover = useCallback(() => {
     setIsTakenOver(true);
@@ -280,12 +349,32 @@ export function useMonitor(): [MonitorState, MonitorActions] {
     takeoverExecuteRef.current = handler;
   }, []);
 
+  // FIX: separate register for resume handler
+  const registerResumeExecute = useCallback((handler: (() => Promise<void>) | null) => {
+    resumeExecuteRef.current = handler;
+  }, []);
+
   const triggerTakeover = useCallback(async () => {
     beginTakeover();
     if (takeoverExecuteRef.current) {
       await takeoverExecuteRef.current();
     }
   }, [beginTakeover]);
+
+  const triggerResume = useCallback(async () => {
+    // FIX: use ref to avoid stale closure over isPermanentTakeover
+    if (isPermanentTakeoverRef.current) return;
+    if (resumeInProgressRef.current) return; // prevent double-click
+    setResumeInProgress(true);
+    if (resumeExecuteRef.current) {
+      await resumeExecuteRef.current();
+    }
+    // FIX: Do NOT immediately reset isTakenOver or callStatus here.
+    // The agent will send call_status: "connected" via data channel after resume completes,
+    // which will drive the state reset in handleDataMessage. This prevents the mic-kill
+    // race condition where the useEffect sees isTakenOver=false and disables the mic
+    // before the agent has finished resuming.
+  }, []);
 
   const state: MonitorState = {
     token,
@@ -298,11 +387,13 @@ export function useMonitor(): [MonitorState, MonitorActions] {
     action,
     summary,
     transferResult,
+    transferMessage,
     bookingData,
     rooms,
     roomsLoading,
     roomsError,
     isTakenOver,
+    isPermanentTakeover,
     pastSummaries,
     pastSummariesLoading,
   };
@@ -314,7 +405,9 @@ export function useMonitor(): [MonitorState, MonitorActions] {
     handleDataMessage,
     beginTakeover,
     triggerTakeover,
+    triggerResume,
     registerTakeoverExecute,
+    registerResumeExecute,
     setCallStatus,
     fetchPastSummaries,
   };

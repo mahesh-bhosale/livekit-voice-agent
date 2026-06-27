@@ -338,10 +338,13 @@ function ConnectedDashboard({
   }, [room, actions]);
 
   useEffect(() => {
-    if (localParticipant && !state.isTakenOver) {
+    // Only disable mic when NOT in takeover AND the call is in a stable non-takeover state.
+    // This prevents the race condition where a brief isTakenOver=false flash
+    // during resume transition kills the mic prematurely.
+    if (localParticipant && !state.isTakenOver && state.callStatus === "connected") {
       void localParticipant.setMicrophoneEnabled(false);
     }
-  }, [localParticipant, state.roomName, state.isTakenOver]);
+  }, [localParticipant, state.roomName, state.isTakenOver, state.callStatus]);
 
   const executeTakeover = useCallback(async () => {
     try {
@@ -364,11 +367,32 @@ function ConnectedDashboard({
     return () => actions.registerTakeoverExecute(null);
   }, [actions, executeTakeover]);
 
+  const executeResume = useCallback(async () => {
+    try {
+      await room.localParticipant.publishData(
+        JSON.stringify({ type: "resume_request" }),
+        { reliable: true },
+      );
+    } catch (e) {
+      console.error("Failed to publish resume request:", e);
+    }
+    try {
+      await localParticipant.setMicrophoneEnabled(false);
+    } catch (e) {
+      console.error("Failed to disable mic:", e);
+    }
+  }, [room, localParticipant]);
+
+  useEffect(() => {
+    actions.registerResumeExecute(executeResume);
+    return () => actions.registerResumeExecute(null);
+  }, [actions, executeResume]);
+
   useEffect(() => {
     if (state.isTakenOver && localParticipant && !isMicrophoneEnabled) {
       void localParticipant.setMicrophoneEnabled(true);
     }
-  }, [state.isTakenOver, localParticipant, isMicrophoneEnabled]);
+  }, [state.isTakenOver, state.isPermanentTakeover, localParticipant, isMicrophoneEnabled]);
 
   const toggleMic = useCallback(async () => {
     if (localParticipant) {
@@ -376,30 +400,25 @@ function ConnectedDashboard({
     }
   }, [localParticipant, isMicrophoneEnabled]);
 
-  const endTakeover = useCallback(() => {
-    if (localParticipant) localParticipant.setMicrophoneEnabled(false);
-    actions.stopWatching();
-  }, [localParticipant, actions]);
-
-  const resumeAI = useCallback(async () => {
+  const endTakeover = useCallback(async () => {
+    // Send end_call_request signal so agent can say goodbye and finalize
     try {
       await room.localParticipant.publishData(
-        new TextEncoder().encode(JSON.stringify({ type: "resume_request" })),
+        JSON.stringify({ type: "end_call_request" }),
         { reliable: true },
       );
     } catch (e) {
-      console.error("Failed to publish resume request:", e);
+      console.error("Failed to publish end_call_request:", e);
     }
-    if (localParticipant) {
-      void localParticipant.setMicrophoneEnabled(false);
-    }
-  }, [room, localParticipant]);
+    if (localParticipant) localParticipant.setMicrophoneEnabled(false);
+    actions.stopWatching();
+  }, [room, localParticipant, actions]);
 
   return (
     <div className="flex-1 flex flex-col lg:flex-row w-full max-w-[1600px] mx-auto relative">
       <div className="flex-1 flex flex-col min-w-0">
         {state.transferResult && state.callStatus !== "takeover" && (
-          <TransferBanner result={state.transferResult} />
+          <TransferBanner result={state.transferResult} message={state.transferMessage} />
         )}
 
         {state.isTakenOver && (
@@ -409,7 +428,11 @@ function ConnectedDashboard({
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-60" />
                 <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-500" />
               </span>
-              <span className="text-xs font-semibold text-rose-300">You are now live with the caller</span>
+              <span className="text-xs font-semibold text-rose-300">
+                {state.isPermanentTakeover
+                  ? "Human connected — speak through your monitor microphone"
+                  : "You are now live with the caller"}
+              </span>
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -422,13 +445,15 @@ function ConnectedDashboard({
               >
                 {isMicrophoneEnabled ? <Mic className="h-4 w-4" /> : <MicOff className="h-4 w-4" />}
               </button>
-              <button
-                onClick={resumeAI}
-                className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all active:scale-95"
-              >
-                <Play className="h-3.5 w-3.5" />
-                Resume AI
-              </button>
+              {!state.isPermanentTakeover && (
+                <button
+                  onClick={() => void actions.triggerResume()}
+                  className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all active:scale-95"
+                >
+                  <Play className="h-3.5 w-3.5" />
+                  Resume AI
+                </button>
+              )}
               <button
                 onClick={endTakeover}
                 className="px-3 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all active:scale-95"
@@ -501,22 +526,34 @@ function ConnectedDashboard({
   );
 }
 
-function TransferBanner({ result }: { result: string }) {
+function TransferBanner({ result, message }: { result: string; message?: string | null }) {
   const accepted = result === "accepted";
+  const noAnswer = result === "no-answer";
+  const declined = result === "declined";
+  const unavailable = result === "unavailable";
+
+  let text = message || "Warm transfer could not be completed.";
+  if (accepted) text = "Warm transfer accepted — speak through your monitor microphone.";
+  else if (noAnswer) text = "Human agent did not pick up the phone. AI has resumed the conversation.";
+  else if (declined) text = "Human agent declined the transfer. AI has resumed the conversation.";
+  else if (unavailable) text = "Could not reach a human agent (line busy or unavailable). AI has resumed the conversation.";
+
   return (
     <div
       className={`px-6 py-3 border-b flex items-center gap-2 text-xs font-medium ${
         accepted
           ? "bg-teal-500/10 border-teal-500/20 text-teal-300"
-          : "bg-amber-500/10 border-amber-500/20 text-amber-300"
+          : noAnswer
+            ? "bg-orange-500/10 border-orange-500/20 text-orange-300"
+            : declined
+              ? "bg-amber-500/10 border-amber-500/20 text-amber-300"
+              : unavailable
+                ? "bg-red-500/10 border-red-500/20 text-red-300"
+                : "bg-amber-500/10 border-amber-500/20 text-amber-300"
       }`}
     >
       <PhoneForwarded className="h-4 w-4 shrink-0" />
-      {accepted
-        ? "Warm transfer accepted — human agent is being connected."
-        : result === "declined"
-          ? "Warm transfer declined — human agent unavailable."
-          : "Warm transfer could not be completed."}
+      {text}
     </div>
   );
 }
@@ -577,7 +614,12 @@ function AgentStatePill({ state }: { state: AgentState }) {
 
 function IntentBadge({ intent }: { intent: string }) {
   const isBooking = intent === "booking";
-  const isTransfer = intent === "transfer_request";
+  const isTransfer = intent === "transfer_to_human" || intent === "transfer_request";
+
+  const label =
+    intent === "transfer_to_human"
+      ? "Transfer to Human"
+      : intent.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
   return (
     <div className="mt-1">
@@ -597,7 +639,7 @@ function IntentBadge({ intent }: { intent: string }) {
         ) : (
           <ShieldCheck className="h-3 w-3" />
         )}
-        {intent.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
+        {label}
       </span>
     </div>
   );
@@ -608,7 +650,10 @@ function ActionLine({ action }: { action: string }) {
     return <p className="mt-1 text-xs text-slate-600 italic">No active action</p>;
   }
 
-  const label = action.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  const label =
+    action === "initiating_warm_transfer"
+      ? "Initiating Warm Transfer"
+      : action.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
   return (
     <div className="mt-1 flex items-center gap-2">

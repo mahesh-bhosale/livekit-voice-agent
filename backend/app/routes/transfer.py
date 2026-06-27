@@ -40,15 +40,13 @@ async def transfer_twiml(
     from urllib.parse import quote
 
     gather_action = f"{_public_api_base()}/api/transfer/gather?room={quote(room)}"
-    spoken = (
-        f"Hello, this is ClinicConnect Voice. "
-        f"A caller needs assistance. {reason}. "
-        f"Call summary: {summary}. "
+    spoken = summary or (
+        f"A caller needs assistance regarding {reason}. "
         f"Press 1 to accept this call, or press 2 to decline."
     )
     return _twiml(
         f'<Say voice="Polly.Joanna">{spoken}</Say>'
-        f'<Gather numDigits="1" action="{gather_action}" method="POST" timeout="12">'
+        f'<Gather numDigits="1" action="{gather_action}" method="POST" timeout="15" actionOnEmptyResult="true">'
         f'<Say voice="Polly.Joanna">Press 1 to accept, or 2 to decline.</Say>'
         f"</Gather>"
         f'<Say voice="Polly.Joanna">No response received. Goodbye.</Say>'
@@ -63,19 +61,53 @@ async def transfer_gather(request: Request, room: str = Query(...)):
     if digits == "1":
         resolve_transfer(room, "accepted")
         return _twiml(
-            '<Say voice="Polly.Joanna">Thank you. The caller is being connected. Please stay on the line.</Say>'
+            '<Say voice="Polly.Joanna">'
+            "Thank you. The caller is being connected. "
+            "Please open the monitor dashboard and speak through your microphone. "
+            "Please stay on the line."
+            "</Say>"
         )
 
-    resolve_transfer(room, "declined")
-    return _twiml('<Say voice="Polly.Joanna">Understood. We will let the caller know you are unavailable.</Say>')
+    if digits == "2":
+        resolve_transfer(room, "declined")
+        return _twiml(
+            '<Say voice="Polly.Joanna">'
+            "Understood. We will let the caller know you are unavailable. Goodbye."
+            "</Say>"
+        )
+
+    # FIX: No digit entered (gather timed out) — treat as no-answer
+    resolve_transfer(room, "no-answer")
+    return _twiml(
+        '<Say voice="Polly.Joanna">'
+        "No response detected. We will let the caller know. Goodbye."
+        "</Say>"
+    )
 
 
 @router.post("/transfer/status")
 async def transfer_status(request: Request, room: str = Query(...)):
+    """
+    FIX: Twilio calls this webhook when the outbound call changes state.
+    Map each terminal Twilio status to the correct outcome so the AI
+    knows exactly what happened (no-answer vs busy vs failed).
+    """
     form = await request.form()
     call_status = form.get("CallStatus", "")
-    
-    # If call finished but wasn't accepted, resolve immediately
-    if call_status in ("completed", "failed", "busy", "no-answer", "canceled"):
-        resolve_transfer(room, "unavailable")
+
+    # Map Twilio terminal statuses to our outcome vocabulary
+    status_map = {
+        "no-answer": "no-answer",   # Phone rang, nobody picked up
+        "busy": "unavailable",      # Line was busy
+        "failed": "unavailable",    # Call could not be placed
+        "canceled": "unavailable",  # Call was canceled before connecting
+        "completed": None,          # Call completed normally — gather handled it
+    }
+
+    if call_status in status_map:
+        outcome = status_map[call_status]
+        if outcome is not None:
+            # Only resolve if not already resolved by /gather
+            resolve_transfer(room, outcome, only_if_pending=True)
+
     return Response(status_code=200)

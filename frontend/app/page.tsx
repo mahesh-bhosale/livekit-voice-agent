@@ -248,6 +248,7 @@ function ActiveCallView({ roomName, onEndCall, onSummary }: ActiveCallViewProps)
   const room = useRoomContext();
   const [callDuration, setCallDuration] = useState(0);
   const [callStatus, setCallStatus] = useState("connected");
+  const [transferNotice, setTransferNotice] = useState<string | null>(null);
 
   const connectionState = localParticipant ? "connected" : "connecting";
 
@@ -262,6 +263,18 @@ function ActiveCallView({ roomName, onEndCall, onSummary }: ActiveCallViewProps)
         const data = JSON.parse(new TextDecoder().decode(payload));
         if (data.type === "summary") onSummary(data.text);
         if (data.type === "call_status") setCallStatus(data.status);
+        if (data.type === "transfer_result") {
+          if (data.result === "no-answer") {
+            setTransferNotice("Human agent did not answer the phone.");
+          } else if (data.result === "declined") {
+            setTransferNotice("Human agent declined the call.");
+          } else if (data.result === "accepted") {
+            setTransferNotice("Connected to a human specialist.");
+            setCallStatus("transfer_connected");
+          } else if (data.result === "unavailable") {
+            setTransferNotice("Could not reach a human agent.");
+          }
+        }
       } catch {
         // ignore
       }
@@ -329,6 +342,9 @@ function ActiveCallView({ roomName, onEndCall, onSummary }: ActiveCallViewProps)
         </div>
 
         <h3 className="text-xl font-bold text-white mb-1">{AGENT_NAME} · Virtual Receptionist</h3>
+        {transferNotice && (
+          <p className="text-xs text-amber-400 mb-2 text-center max-w-xs">{transferNotice}</p>
+        )}
         <p className="text-xs text-slate-400 mb-8 font-mono tracking-wider">{formatDuration(callDuration)}</p>
 
         <div className="flex items-center justify-center gap-6 w-full max-w-xs">

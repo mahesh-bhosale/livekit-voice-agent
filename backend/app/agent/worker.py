@@ -20,7 +20,6 @@ from livekit.agents import (
 )
 from livekit.agents.llm import ChatMessage
 from livekit.plugins import cartesia, deepgram, groq, silero
-from livekit.agents.voice.agent_activity import TurnDetectionMode
 
 from app.services.transfer import build_transfer_summary
 
@@ -40,9 +39,12 @@ SYSTEM_PROMPT = (
     "3. Once you have all 4 details, call the check_availability tool.\n"
     "4. If available, confirm with the caller, then call the book_appointment tool, then read back the full booking details.\n"
     "5. If the caller says anything indicating they want a human — billing issue, complaint, frustration, "
-    "explicitly asking for a person — call the request_human_transfer tool immediately with a short reason. "
-    "If the transfer fails (declined or unavailable), explain that the representative is not available right now, "
-    "and do NOT automatically retry the transfer. Wait for the user to explicitly request it again.\n"
+    "explicitly asking for a person — call the request_human_transfer tool EXACTLY ONCE with a short reason. "
+    "CRITICAL: After calling request_human_transfer, NEVER call it again regardless of the outcome. "
+    "If the transfer fails (declined, no-answer, or unavailable), say: "
+    "'Unfortunately, no human agent is currently available. Please try again later.' "
+    "Then offer to help with their issue yourself. Do NOT retry the transfer tool even if the caller asks — "
+    "instead say you have already tried and suggest they call back later or leave a message.\n"
     "6. Keep responses brief and conversational, like a real phone call."
 )
 
@@ -133,14 +135,16 @@ async def initiate_transfer_via_api(room_name: str, reason: str, summary: str) -
 
 
 class ClinicBookingAssistant(Agent):
-    def __init__(self, room, transcript_turns: list, takeover_event: asyncio.Event, on_takeover=None, on_transfer_accept=None):
+    def __init__(self, room, transcript_turns: list, on_takeover=None, on_transfer_accept=None):
         super().__init__(instructions=SYSTEM_PROMPT)
         self.room = room
         self.transcript_turns = transcript_turns
-        self.takeover_event = takeover_event
         self.on_takeover = on_takeover
         self.on_transfer_accept = on_transfer_accept
+        self.last_booking: dict | None = None
         self.transfer_in_progress = False
+        self.transfer_attempted = False
+        self._transfer_lock = asyncio.Lock()
 
     @function_tool
     async def check_availability(self, date: str, time: str) -> dict:
@@ -182,6 +186,13 @@ class ClinicBookingAssistant(Agent):
         )
 
         await send_custom_data(self.room, {"type": "action", "action": ""})
+        self.last_booking = {
+            "name": name,
+            "reason": reason,
+            "date": date,
+            "time": time,
+            "phone": phone,
+        }
         await send_custom_data(
             self.room,
             {
@@ -198,67 +209,125 @@ class ClinicBookingAssistant(Agent):
     @function_tool
     async def request_human_transfer(self, reason: str) -> dict:
         """Transfer the caller to a human agent when they ask for a person or have billing/complaint issues."""
-        if self.transfer_in_progress:
-            logger.info("request_human_transfer ignored: transfer already in progress")
+        # Hard block: once a transfer has been attempted and completed (any outcome),
+        # refuse all subsequent calls to prevent infinite transfer loops.
+        if self.transfer_attempted:
+            logger.info("request_human_transfer blocked: transfer already attempted this session")
             return {
-                "status": "in_progress",
-                "message": "A transfer call is already active. Please wait.",
+                "status": "already_attempted",
+                "message": (
+                    "A transfer was already attempted this session and could not connect. "
+                    "Do NOT call this tool again. Tell the caller: "
+                    "'I have already tried to reach a human agent but was unable to connect. "
+                    "Please try calling back later or I can try to help you myself.'"
+                ),
             }
-        self.transfer_in_progress = True
+
+        async with self._transfer_lock:
+            if self.transfer_in_progress:
+                logger.info("request_human_transfer ignored: transfer already in progress")
+                return {
+                    "status": "in_progress",
+                    "message": "A transfer is already in progress. Please wait.",
+                }
+            self.transfer_in_progress = True
+
         logger.info(f"request_human_transfer: {reason}")
 
-        await send_custom_data(self.room, {"type": "intent", "intent": "transfer_request"})
-        await send_custom_data(self.room, {"type": "action", "action": "transferring"})
+        await send_custom_data(self.room, {"type": "intent", "intent": "transfer_to_human"})
+        await send_custom_data(self.room, {"type": "action", "action": "initiating_warm_transfer"})
         await send_call_status(self.room, "transferring")
 
-        summary = build_transfer_summary(reason, self.transcript_turns)
+        summary = build_transfer_summary(reason, self.transcript_turns, self.last_booking)
         outcome = await initiate_transfer_via_api(self.room.name, reason, summary)
 
         await send_custom_data(self.room, {"type": "action", "action": ""})
 
+        if outcome == "in_progress":
+            async with self._transfer_lock:
+                self.transfer_in_progress = False
+            # Don't set transfer_attempted for in_progress — it's a duplicate guard, not a real attempt
+            return {
+                "status": "in_progress",
+                "message": "Transfer already in progress. Please wait.",
+            }
+
         if outcome == "accepted":
+            async with self._transfer_lock:
+                self.transfer_in_progress = False
+            self.transfer_attempted = True
             await send_call_status(self.room, "transfer_connected")
             await send_custom_data(
                 self.room,
                 {"type": "transfer_result", "result": "accepted", "message": "Human agent accepted the call."},
             )
+            await send_custom_data(self.room, {"type": "supervisor_audio", "enabled": True})
             if self.on_transfer_accept:
                 asyncio.create_task(self.on_transfer_accept())
             return {
                 "status": "accepted",
                 "message": (
-                    "The human agent accepted. Tell the caller you are connecting them now "
-                    "and that a team member will join shortly."
+                    "The human agent accepted. Tell the caller a specialist is connecting now, "
+                    "then say goodbye warmly."
                 ),
             }
 
-        # Clear flag as transfer failed
-        self.transfer_in_progress = False
+        async with self._transfer_lock:
+            self.transfer_in_progress = False
+        self.transfer_attempted = True
 
         await send_call_status(self.room, "connected")
+
+        if outcome in ("no-answer", "timeout"):
+            await send_custom_data(
+                self.room,
+                {
+                    "type": "transfer_result",
+                    "result": "no-answer",
+                    "message": "Human agent did not answer the phone.",
+                },
+            )
+            return {
+                "status": "no-answer",
+                "message": (
+                    "The human agent did not pick up the phone. "
+                    "Say: 'Unfortunately, no human agent is currently available. Please try again later.' "
+                    "Offer to help with their issue or take a message. "
+                    "Do NOT call the transfer tool again unless they explicitly ask."
+                ),
+            }
+
+        if outcome == "declined":
+            await send_custom_data(
+                self.room,
+                {
+                    "type": "transfer_result",
+                    "result": "declined",
+                    "message": "Human agent declined the call.",
+                },
+            )
+            return {
+                "status": "declined",
+                "message": (
+                    "The human agent declined. "
+                    "Say: 'Unfortunately, no human agent is currently available. Please try again later.' "
+                    "Offer alternatives. Do NOT call the transfer tool again unless they explicitly ask."
+                ),
+            }
+
         await send_custom_data(
             self.room,
             {
                 "type": "transfer_result",
-                "result": outcome,
-                "message": "Human agent was not available.",
+                "result": "unavailable",
+                "message": "Could not reach a human agent.",
             },
         )
-
-        if outcome == "declined":
-            return {
-                "status": "declined",
-                "message": (
-                    "The human agent is unavailable right now. Apologize, offer to take a message, "
-                    "or help with booking instead."
-                ),
-            }
-
         return {
             "status": "unavailable",
             "message": (
-                "Could not reach a human agent at this time. Apologize and offer to help "
-                "or schedule a callback."
+                "Could not reach a human agent. Apologize and offer to help. "
+                "Do NOT call the transfer tool again unless they explicitly ask."
             ),
         }
 
@@ -285,8 +354,11 @@ async def entrypoint(ctx: JobContext):
 
     transcript_turns: list[dict] = []
     has_finalized = False
-    takeover_event = asyncio.Event()
+
     agent_paused = False
+    manual_takeover_active = False
+    transfer_permanent = False
+    agent_paused_lock = asyncio.Lock()
 
     @session.on("agent_state_changed")
     def on_agent_state_changed(event: AgentStateChangedEvent):
@@ -320,58 +392,106 @@ async def entrypoint(ctx: JobContext):
                 )
 
     async def handle_takeover():
-        nonlocal agent_paused
-        if agent_paused:
-            return
-        agent_paused = True
-        takeover_event.set()
-        logger.info("Take-over requested — pausing AI agent VAD")
+        nonlocal agent_paused, manual_takeover_active
+        async with agent_paused_lock:
+            if agent_paused and manual_takeover_active:
+                logger.info("Takeover ignored: already in manual takeover")
+                return
+            if transfer_permanent:
+                logger.info("Takeover ignored: permanent transfer active")
+                return
+            agent_paused = True
+            manual_takeover_active = True
+
+        logger.info("Take-over requested — pausing AI agent")
 
         try:
-            session.update_options(turn_detection="manual")
             session.interrupt()
+            await asyncio.sleep(0.2)
+            session.update_options(turn_detection="manual")
         except Exception as e:
-            logger.error(f"Failed to pause VAD: {e}")
+            logger.error(f"Failed to pause agent: {e}")
 
         await send_call_status(ctx.room, "takeover")
         await send_custom_data(ctx.room, {"type": "agent_state", "state": "idle"})
         await send_custom_data(ctx.room, {"type": "action", "action": ""})
 
     async def handle_resume():
-        nonlocal agent_paused
-        if not agent_paused:
-            return
-        agent_paused = False
-        logger.info("Resume requested — resuming AI agent VAD")
+        nonlocal agent_paused, manual_takeover_active
+        async with agent_paused_lock:
+            if transfer_permanent:
+                logger.info("Resume ignored: permanent transfer active")
+                return
+            if not manual_takeover_active:
+                logger.info("Resume ignored: not in manual takeover")
+                return
+            agent_paused = False
+            manual_takeover_active = False
+
+        logger.info("Resume requested — resuming AI agent")
+
+        # Send status FIRST so the frontend gets confirmation immediately
+        # (before the TTS speak call which can take seconds)
+        await send_call_status(ctx.room, "connected")
+        await send_custom_data(ctx.room, {"type": "agent_state", "state": "listening"})
 
         try:
             session.update_options(turn_detection="vad")
+            await asyncio.sleep(0.3)
+            await session.say(
+                "I'm back. How can I continue to help you?",
+                allow_interruptions=True,
+            )
         except Exception as e:
-            logger.error(f"Failed to resume VAD: {e}")
-
-        await send_call_status(ctx.room, "connected")
+            logger.error(f"Failed to resume agent: {e}")
 
     async def handle_transfer_accept():
-        nonlocal agent_paused
-        agent_paused = True
-        takeover_event.set()
-        logger.info("Transfer accepted — permanently closing AI agent session")
+        nonlocal agent_paused, transfer_permanent, manual_takeover_active
+        async with agent_paused_lock:
+            transfer_permanent = True
+            manual_takeover_active = True
+            agent_paused = True
+
+        logger.info("Transfer accepted — pausing AI, enabling supervisor audio via monitor")
 
         try:
-            await session.aclose()
+            session.interrupt()
+            session.update_options(turn_detection="manual")
         except Exception:
             pass
+
+        await send_call_status(ctx.room, "transfer_connected")
+        await send_custom_data(ctx.room, {"type": "supervisor_audio", "enabled": True})
+        await send_custom_data(ctx.room, {"type": "agent_state", "state": "idle"})
+
+    async def handle_end_call_from_watcher():
+        """Handle watcher clicking End Call — say goodbye and finalize."""
+        nonlocal agent_paused
+        logger.info("End call requested by watcher")
+        if not agent_paused:
+            try:
+                await session.say(
+                    "The call is being ended by the supervisor. Thank you for calling. Goodbye!",
+                    allow_interruptions=False,
+                )
+            except Exception as e:
+                logger.error(f"Failed to say goodbye: {e}")
+        await finalize_call()
 
     @ctx.room.on("data_received")
     def on_data_received(data: rtc.DataPacket):
         try:
             payload = json.loads(data.data.decode("utf-8"))
-            if payload.get("type") == "takeover_request":
+            msg_type = payload.get("type")
+
+            if msg_type == "takeover_request":
                 asyncio.create_task(handle_takeover())
-            elif payload.get("type") == "resume_request":
+            elif msg_type == "resume_request":
                 asyncio.create_task(handle_resume())
-        except Exception:
-            pass
+            elif msg_type == "end_call_request":
+                asyncio.create_task(handle_end_call_from_watcher())
+        except Exception as e:
+            logger.error(f"Error parsing data_received: {e}")
 
     async def finalize_call():
         nonlocal has_finalized
@@ -408,8 +528,14 @@ async def entrypoint(ctx: JobContext):
             )
             summary_text = completion.choices[0].message.content or ""
         except Exception as e:
-            logger.error(f"Failed to generate call summary: {e}")
-            summary_text = "Call completed. Summary generation failed."
+            # Check if this is a rate limit error
+            error_str = str(e)
+            if "429" in error_str or "rate_limit" in error_str.lower():
+                logger.warning(f"Rate limit reached - skipping summary generation: {e}")
+                summary_text = f"Call completed. Summary generation skipped due to API rate limit. Transcript has {len(transcript_turns)} turns."
+            else:
+                logger.error(f"Failed to generate call summary: {e}")
+                summary_text = "Call completed. Summary generation failed."
 
         await asyncio.to_thread(db_save_call_summary, ctx.room.name, summary_text, transcript_turns)
         await send_custom_data(ctx.room, {"type": "summary", "text": summary_text})
@@ -423,9 +549,8 @@ async def entrypoint(ctx: JobContext):
     agent = ClinicBookingAssistant(
         ctx.room,
         transcript_turns,
-        takeover_event,
         on_takeover=handle_takeover,
-        on_transfer_accept=handle_transfer_accept
+        on_transfer_accept=handle_transfer_accept,
     )
 
     logger.info("Starting AgentSession pipeline...")

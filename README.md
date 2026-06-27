@@ -174,7 +174,8 @@ ngrok http 8000
 2. The frontend publishes `{ type: "takeover_request" }` on the data channel.
 3. The agent worker pauses AI processing, interrupts speech, and broadcasts `call_status: takeover`.
 4. The watcher's microphone is enabled; they speak directly to the caller.
-5. Click **End** to leave the room and end the take-over session.
+5. Click **Resume AI** to hand control back — the agent resumes with VAD and says "I'm back."
+6. Click **End** to send `end_call_request` and leave the room — the agent says goodbye and finalizes.
 
 ### Warm transfer flow
 
@@ -254,7 +255,6 @@ This is a **hackathon prototype**, not production-ready software:
 - **Twilio trial constraints** — trial accounts can only call **verified** phone numbers; outbound caller ID must be a Twilio number.
 - **Warm transfer bridging** — accept/decline is fully implemented via Twilio DTMF; full PSTN↔WebRTC audio bridge requires LiveKit SIP (documented as future work).
 - **No authentication** — anyone with the URL can start or monitor calls.
-- **Take-over is one-way** — no "hand back to AI" button; ending take-over leaves the room.
 
 ## Demo video
 
