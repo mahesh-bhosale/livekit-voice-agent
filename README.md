@@ -258,7 +258,11 @@ This is a **hackathon prototype**, not production-ready software:
 
 ## Demo video
 
-[Demo video link placeholder]
+
+
+https://github.com/user-attachments/assets/2ff8dca8-b7e8-453e-a24a-9ed2deb76554
+
+
 
 Suggested demo script:
 
