@@ -384,7 +384,7 @@ function ConnectedDashboard({
   const resumeAI = useCallback(async () => {
     try {
       await room.localParticipant.publishData(
-        JSON.stringify({ type: "resume_request" }),
+        new TextEncoder().encode(JSON.stringify({ type: "resume_request" })),
         { reliable: true },
       );
     } catch (e) {

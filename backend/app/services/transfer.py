@@ -54,6 +54,10 @@ async def initiate_warm_transfer(room_name: str, reason: str, summary: str) -> s
             f"&summary={quote(summary[:900])}"
         )
 
+        status_callback_url = (
+            f"{_public_api_base()}/api/transfer/status"
+            f"?room={quote(room_name)}"
+        )
         await asyncio.to_thread(
             client.calls.create,
             to=settings.HUMAN_AGENT_NUMBER,
@@ -61,6 +65,9 @@ async def initiate_warm_transfer(room_name: str, reason: str, summary: str) -> s
             url=twiml_url,
             method="GET",
             timeout=45,
+            status_callback=status_callback_url,
+            status_callback_method="POST",
+            status_callback_event=["initiated", "ringing", "answered", "completed"],
         )
         logger.info("Twilio warm-transfer call initiated for room %s", room_name)
 

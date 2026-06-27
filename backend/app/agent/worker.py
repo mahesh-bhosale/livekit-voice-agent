@@ -40,7 +40,9 @@ SYSTEM_PROMPT = (
     "3. Once you have all 4 details, call the check_availability tool.\n"
     "4. If available, confirm with the caller, then call the book_appointment tool, then read back the full booking details.\n"
     "5. If the caller says anything indicating they want a human — billing issue, complaint, frustration, "
-    "explicitly asking for a person — call the request_human_transfer tool immediately with a short reason.\n"
+    "explicitly asking for a person — call the request_human_transfer tool immediately with a short reason. "
+    "If the transfer fails (declined or unavailable), explain that the representative is not available right now, "
+    "and do NOT automatically retry the transfer. Wait for the user to explicitly request it again.\n"
     "6. Keep responses brief and conversational, like a real phone call."
 )
 

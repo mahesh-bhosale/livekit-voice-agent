@@ -68,3 +68,14 @@ async def transfer_gather(request: Request, room: str = Query(...)):
 
     resolve_transfer(room, "declined")
     return _twiml('<Say voice="Polly.Joanna">Understood. We will let the caller know you are unavailable.</Say>')
+
+
+@router.post("/transfer/status")
+async def transfer_status(request: Request, room: str = Query(...)):
+    form = await request.form()
+    call_status = form.get("CallStatus", "")
+    
+    # If call finished but wasn't accepted, resolve immediately
+    if call_status in ("completed", "failed", "busy", "no-answer", "canceled"):
+        resolve_transfer(room, "unavailable")
+    return Response(status_code=200)
