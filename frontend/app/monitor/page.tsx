@@ -348,10 +348,9 @@ function ConnectedDashboard({
 
   const executeTakeover = useCallback(async () => {
     try {
-      await room.localParticipant.publishData(
-        JSON.stringify({ type: "takeover_request" }),
-        { reliable: true },
-      );
+      const encoder = new TextEncoder();
+      const data = encoder.encode(JSON.stringify({ type: "takeover_request" }));
+      await room.localParticipant.publishData(data, { reliable: true });
     } catch (e) {
       console.error("Failed to publish takeover request:", e);
     }
@@ -369,10 +368,9 @@ function ConnectedDashboard({
 
   const executeResume = useCallback(async () => {
     try {
-      await room.localParticipant.publishData(
-        JSON.stringify({ type: "resume_request" }),
-        { reliable: true },
-      );
+      const encoder = new TextEncoder();
+      const data = encoder.encode(JSON.stringify({ type: "resume_request" }));
+      await room.localParticipant.publishData(data, { reliable: true });
     } catch (e) {
       console.error("Failed to publish resume request:", e);
     }
@@ -403,10 +401,9 @@ function ConnectedDashboard({
   const endTakeover = useCallback(async () => {
     // Send end_call_request signal so agent can say goodbye and finalize
     try {
-      await room.localParticipant.publishData(
-        JSON.stringify({ type: "end_call_request" }),
-        { reliable: true },
-      );
+      const encoder = new TextEncoder();
+      const data = encoder.encode(JSON.stringify({ type: "end_call_request" }));
+      await room.localParticipant.publishData(data, { reliable: true });
     } catch (e) {
       console.error("Failed to publish end_call_request:", e);
     }

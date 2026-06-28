@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     # Used by the agent worker to reach this FastAPI server
     BACKEND_API_URL: str = "http://localhost:8000"
 
+    # LiveKit SIP trunk for PSTN↔WebRTC bridging (warm transfer audio)
+    # Obtain from LiveKit Cloud → SIP → Trunks → Inbound Trunk → SIP URI domain
+    # e.g. "abc123.sip.livekit.cloud" or your custom SIP trunk host
+    LIVEKIT_SIP_DOMAIN: str = ""
+
+    # SIP username prefix for dispatch rule mapping (optional)
+    LIVEKIT_SIP_USERNAME_PREFIX: str = ""
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

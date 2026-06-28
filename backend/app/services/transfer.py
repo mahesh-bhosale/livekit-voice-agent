@@ -86,7 +86,7 @@ async def initiate_warm_transfer(room_name: str, reason: str, summary: str) -> s
             to=settings.HUMAN_AGENT_NUMBER,
             from_=settings.TWILIO_FROM_NUMBER,
             url=twiml_url,
-            method="GET",
+            method="POST",
             timeout=30,
             status_callback=status_callback_url,
             status_callback_method="POST",

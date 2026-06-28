@@ -332,6 +332,22 @@ class ClinicBookingAssistant(Agent):
         }
 
 
+def _is_session_alive(session: AgentSession) -> bool:
+    """Check if the AgentSession is still running and safe to call methods on."""
+    try:
+        # AgentSession sets an internal flag when closed/stopped.
+        # If the session has been finalized, accessing certain properties
+        # or calling methods will raise RuntimeError.
+        # We do a lightweight probe here.
+        if hasattr(session, '_closed') and session._closed:
+            return False
+        if hasattr(session, '_running') and not session._running:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 async def entrypoint(ctx: JobContext):
     logger.info(f"Connecting to room {ctx.room.name}")
 
@@ -420,15 +436,37 @@ async def entrypoint(ctx: JobContext):
         nonlocal agent_paused, manual_takeover_active
         async with agent_paused_lock:
             if transfer_permanent:
-                logger.info("Resume ignored: permanent transfer active")
+                logger.info("[RESUME] Ignored: permanent transfer active")
                 return
             if not manual_takeover_active:
-                logger.info("Resume ignored: not in manual takeover")
+                logger.info("[RESUME] Ignored: not in manual takeover")
                 return
             agent_paused = False
             manual_takeover_active = False
 
-        logger.info("Resume requested — resuming AI agent")
+        logger.info("[RESUME] Resuming AI agent — checking session health")
+
+        # BUG #2 FIX: Check if session is still alive before touching it.
+        # The session can be destroyed if finalize_call() ran due to a watcher
+        # disconnect (now fixed by caller identity check, but this is defense-in-depth).
+        session_alive = _is_session_alive(session)
+        logger.info("[RESUME] session_alive=%s", session_alive)
+
+        if not session_alive:
+            logger.error(
+                "[RESUME] AgentSession is dead — cannot resume. "
+                "Sending 'ended' to frontend so it can recover."
+            )
+            await send_call_status(ctx.room, "ended")
+            await send_custom_data(ctx.room, {
+                "type": "agent_state",
+                "state": "ended",
+            })
+            await send_custom_data(ctx.room, {
+                "type": "resume_failed",
+                "reason": "session_dead",
+            })
+            return
 
         # Send status FIRST so the frontend gets confirmation immediately
         # (before the TTS speak call which can take seconds)
@@ -443,7 +481,13 @@ async def entrypoint(ctx: JobContext):
                 allow_interruptions=True,
             )
         except Exception as e:
-            logger.error(f"Failed to resume agent: {e}")
+            logger.error(f"[RESUME] Failed to resume agent: {e}")
+            # Notify frontend so it doesn't get stuck in takeover state
+            await send_call_status(ctx.room, "ended")
+            await send_custom_data(ctx.room, {
+                "type": "resume_failed",
+                "reason": str(e),
+            })
 
     async def handle_transfer_accept():
         nonlocal agent_paused, transfer_permanent, manual_takeover_active
@@ -452,16 +496,25 @@ async def entrypoint(ctx: JobContext):
             manual_takeover_active = True
             agent_paused = True
 
-        logger.info("Transfer accepted — pausing AI, enabling supervisor audio via monitor")
+        logger.info("[TRANSFER][ACCEPT] Agent paused, SIP bridge should now connect")
 
         try:
             session.interrupt()
+            await asyncio.sleep(0.2)
             session.update_options(turn_detection="manual")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"[TRANSFER][ACCEPT] Failed to pause agent: {e}")
 
         await send_call_status(ctx.room, "transfer_connected")
+        await send_custom_data(ctx.room, {"type": "transfer_result", "result": "accepted"})
+        # Enable supervisor audio in the watcher dashboard.
+        # Without LiveKit SIP trunk, the watcher's browser mic is the audio bridge
+        # between the human agent and the caller.
         await send_custom_data(ctx.room, {"type": "supervisor_audio", "enabled": True})
+        await send_custom_data(ctx.room, {
+            "type": "action",
+            "action": "sip_bridge_connecting",
+        })
         await send_custom_data(ctx.room, {"type": "agent_state", "state": "idle"})
 
     async def handle_end_call_from_watcher():
@@ -540,11 +593,46 @@ async def entrypoint(ctx: JobContext):
         await asyncio.to_thread(db_save_call_summary, ctx.room.name, summary_text, transcript_turns)
         await send_custom_data(ctx.room, {"type": "summary", "text": summary_text})
 
+    # BUG #2 FIX: Track the caller's identity so we only finalize when the
+    # actual caller disconnects, not when the watcher/supervisor leaves.
+    caller_participant_identity: str | None = None
+
+    @ctx.room.on("participant_connected")
+    def on_participant_connected(participant: rtc.RemoteParticipant):
+        nonlocal caller_participant_identity
+        # The first non-agent, non-watcher participant is the caller
+        if (
+            caller_participant_identity is None
+            and participant.identity != "agent"
+            and not participant.identity.startswith("watcher")
+        ):
+            caller_participant_identity = participant.identity
+            logger.info("[WORKER] Caller identity captured: %s", caller_participant_identity)
+        else:
+            logger.info(
+                "[WORKER] Additional participant connected: %s (caller=%s)",
+                participant.identity, caller_participant_identity,
+            )
+
     @ctx.room.on("participant_disconnected")
-    def on_participant_disconnected(participant):
-        if participant.identity != "agent" and not participant.identity.startswith("watcher"):
-            logger.info(f"Caller left: {participant.identity}")
+    def on_participant_disconnected(participant: rtc.RemoteParticipant):
+        logger.info(
+            "[WORKER] participant_disconnected: identity=%s caller=%s",
+            participant.identity,
+            caller_participant_identity,
+        )
+        if participant.identity == caller_participant_identity:
+            logger.info(
+                "[WORKER] Caller (%s) disconnected — finalizing call",
+                participant.identity,
+            )
             asyncio.create_task(finalize_call())
+        else:
+            logger.info(
+                "[WORKER] Non-caller participant (%s) disconnected — ignoring, "
+                "call continues",
+                participant.identity,
+            )
 
     agent = ClinicBookingAssistant(
         ctx.room,
