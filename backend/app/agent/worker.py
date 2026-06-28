@@ -374,7 +374,11 @@ async def entrypoint(ctx: JobContext):
     agent_paused = False
     manual_takeover_active = False
     transfer_permanent = False
+    agent_session_stopped = False
     agent_paused_lock = asyncio.Lock()
+
+    # Event set when the human SIP participant joins the LiveKit room
+    human_sip_joined = asyncio.Event()
 
     @session.on("agent_state_changed")
     def on_agent_state_changed(event: AgentStateChangedEvent):
@@ -496,7 +500,7 @@ async def entrypoint(ctx: JobContext):
             manual_takeover_active = True
             agent_paused = True
 
-        logger.info("[TRANSFER][ACCEPT] Agent paused, SIP bridge should now connect")
+        logger.info("[TRANSFER][ACCEPT] Agent paused, waiting for SIP participant")
 
         try:
             session.interrupt()
@@ -507,15 +511,82 @@ async def entrypoint(ctx: JobContext):
 
         await send_call_status(ctx.room, "transfer_connected")
         await send_custom_data(ctx.room, {"type": "transfer_result", "result": "accepted"})
-        # Enable supervisor audio in the watcher dashboard.
-        # Without LiveKit SIP trunk, the watcher's browser mic is the audio bridge
-        # between the human agent and the caller.
         await send_custom_data(ctx.room, {"type": "supervisor_audio", "enabled": True})
         await send_custom_data(ctx.room, {
             "type": "action",
             "action": "sip_bridge_connecting",
         })
         await send_custom_data(ctx.room, {"type": "agent_state", "state": "idle"})
+
+        # Schedule the agent disconnect — waits for the human SIP participant
+        # to join, lets the AI say a brief goodbye, then stops the session
+        # so only caller (WebRTC) ↔ human (SIP) remain for direct audio.
+        asyncio.create_task(disconnect_agent_after_sip_join())
+
+    async def disconnect_agent_after_sip_join():
+        """Wait for the human SIP participant to join the room, then stop the
+        AgentSession and mute the agent's audio tracks so only caller ↔ human
+        remain for direct bidirectional audio bridging.
+
+        The agent participant stays connected (for data channel / monitoring)
+        but its audio pipeline is fully shut down."""
+        nonlocal agent_session_stopped
+
+        logger.info("[TRANSFER][DISCONNECT] Waiting for human SIP participant to join...")
+
+        try:
+            await asyncio.wait_for(human_sip_joined.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[TRANSFER][DISCONNECT] Human SIP participant did not join within 30s. "
+                "Agent remains paused; caller and human may still be bridged if "
+                "SIP connection succeeded outside our detection window."
+            )
+            # Even on timeout, try to stop the session — the SIP participant
+            # might have joined with an unexpected identity.
+
+        logger.info("[TRANSFER][DISCONNECT] Human SIP participant detected (or timeout). "
+                     "Giving AI a moment to finish any goodbye utterance...")
+
+        # Brief delay so any in-flight AI goodbye speech finishes
+        await asyncio.sleep(3)
+
+        # --- Stop the AgentSession (kills STT/LLM/TTS pipeline) ---
+        logger.info("[TRANSFER][DISCONNECT] Stopping AgentSession...")
+        try:
+            await session.aclose()
+            agent_session_stopped = True
+            logger.info("[TRANSFER][DISCONNECT] AgentSession stopped successfully")
+        except Exception as e:
+            logger.error(f"[TRANSFER][DISCONNECT] Error stopping session: {e}")
+            agent_session_stopped = True  # Mark stopped even on error
+
+        # --- Mute and unpublish agent's audio tracks ---
+        logger.info("[TRANSFER][DISCONNECT] Muting agent audio tracks...")
+        try:
+            local = ctx.room.local_participant
+            if local:
+                for pub in local.track_publications.values():
+                    if pub.track and pub.track.kind == rtc.TrackKind.KIND_AUDIO:
+                        await local.set_microphone_enabled(False)
+                        logger.info("[TRANSFER][DISCONNECT] Agent microphone disabled")
+                        break
+        except Exception as e:
+            logger.error(f"[TRANSFER][DISCONNECT] Error muting agent tracks: {e}")
+
+        await send_custom_data(ctx.room, {
+            "type": "action",
+            "action": "",
+        })
+        await send_custom_data(ctx.room, {
+            "type": "transfer_bridge_active",
+            "message": "Caller and human are now directly connected.",
+        })
+
+        logger.info(
+            "[TRANSFER][DISCONNECT] Agent audio pipeline fully stopped. "
+            "Room now contains only caller (WebRTC) ↔ human (SIP) for direct bridging."
+        )
 
     async def handle_end_call_from_watcher():
         """Handle watcher clicking End Call — say goodbye and finalize."""
@@ -597,9 +668,39 @@ async def entrypoint(ctx: JobContext):
     # actual caller disconnects, not when the watcher/supervisor leaves.
     caller_participant_identity: str | None = None
 
+    def _is_sip_participant(participant: rtc.RemoteParticipant) -> bool:
+        """Detect if a participant joined via SIP trunk (the human agent).
+        LiveKit SIP participants typically have kind=SIP or an identity
+        starting with 'sip_' or containing a phone number pattern."""
+        identity = participant.identity or ""
+        # Check participant kind if available (livekit-agents >= 0.8)
+        try:
+            if hasattr(participant, 'kind'):
+                from livekit.rtc import ParticipantKind
+                if participant.kind == ParticipantKind.PARTICIPANT_KIND_SIP:
+                    return True
+        except (ImportError, AttributeError):
+            pass
+        # Fallback: check identity patterns
+        if identity.lower().startswith("sip_"):
+            return True
+        if identity.startswith("+") or identity.startswith("phone_"):
+            return True
+        return False
+
     @ctx.room.on("participant_connected")
     def on_participant_connected(participant: rtc.RemoteParticipant):
         nonlocal caller_participant_identity
+
+        # Detect SIP participant (human agent joining via SIP trunk)
+        if _is_sip_participant(participant):
+            logger.info(
+                "[WORKER] Human SIP participant joined: identity=%s",
+                participant.identity,
+            )
+            human_sip_joined.set()
+            return
+
         # The first non-agent, non-watcher participant is the caller
         if (
             caller_participant_identity is None
@@ -624,6 +725,13 @@ async def entrypoint(ctx: JobContext):
         if participant.identity == caller_participant_identity:
             logger.info(
                 "[WORKER] Caller (%s) disconnected — finalizing call",
+                participant.identity,
+            )
+            asyncio.create_task(finalize_call())
+        elif _is_sip_participant(participant):
+            logger.info(
+                "[WORKER] Human SIP participant (%s) disconnected — "
+                "human hung up, finalizing call",
                 participant.identity,
             )
             asyncio.create_task(finalize_call())

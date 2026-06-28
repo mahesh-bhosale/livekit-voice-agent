@@ -2,6 +2,13 @@
 
 A conversational voice agent with **appointment booking**, **live call monitoring**, **human take-over**, and **Twilio warm transfer**. Built for the LiveKit Voice Agent Hackathon.
 
+# ClinicConnect Voice
+
+🎥 **Latest Demo Video:**  
+https://drive.google.com/file/d/1x8hJNk8tjFPTbkk2qbUGdrRjZILJ2VcA/view?usp=sharing
+
+A conversational voice agent with **appointment booking**, **live call monitoring**, **human take-over**, and **Twilio warm transfer**. Built for the LiveKit Voice Agent Hackathon.
+
 ## Overview
 
 ClinicConnect Voice connects callers to **Agent Alex**, a virtual receptionist for Sunrise Clinic. Alex handles natural voice conversations over LiveKit, books appointments via LLM tool calls, and escalates to a human when needed.
@@ -258,7 +265,7 @@ This is a **hackathon prototype**, not production-ready software:
 
 ## Demo video
 
-
+Old video shoot
 
 https://github.com/user-attachments/assets/2ff8dca8-b7e8-453e-a24a-9ed2deb76554
 
